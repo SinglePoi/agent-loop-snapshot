@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-loop-snapshot.dev/schema/0.1.0/artifact-reference.schema.json",
+  "title": "Agent Loop Snapshot Artifact Reference",
+  "description": "A content-addressed reference used when an inline value is too large to keep in an event or checkpoint.",
+  "type": "object",
+  "required": ["schema_version", "digest", "media_type", "byte_length"],
+  "properties": {
+    "schema_version": {
+      "const": "0.1.0"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "Lowercase SHA-256 digest without the algorithm prefix. The stored filename is sha256-<digest>."
+    },
+    "media_type": {
+      "type": "string",
+      "minLength": 1
+    },
+    "byte_length": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "preview": {
+      "type": "string",
+      "description": "Optional short, already-redacted preview; it is not the artifact content."
+    }
+  },
+  "additionalProperties": true
+}

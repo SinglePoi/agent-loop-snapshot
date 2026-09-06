@@ -1,0 +1,23 @@
+{
+  "schema_version": "0.1.0",
+  "checkpoint_id": "cp_00000000-0000-4000-8000-000000000106",
+  "run_id": "run_00000000-0000-4000-8000-000000000106",
+  "created_at": "2026-09-06T03:00:12.000Z",
+  "last_event_id": "evt_00000000-0000-4000-8000-000000000113",
+  "sequence": 13,
+  "state_hash": "9a01e3ac2a32cf60aa6a35ca59e413ba888f759e2e2850bd041bbc866fc9432f",
+  "state": {
+    "goal": "summarize fixture",
+    "answer": "example answer",
+    "tool_results": {
+      "read_goal_metadata": {
+        "character_count": 17,
+        "word_count": 2
+      },
+      "read_runtime_context": {
+        "runtime": "example-runtime",
+        "side_effect": "read_only"
+      }
+    }
+  }
+}

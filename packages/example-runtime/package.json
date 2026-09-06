@@ -1,0 +1,19 @@
+{
+  "name": "@agent-loop-snapshot/example-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "alsnap-example": "dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@agent-loop-snapshot/recorder": "workspace:*",
+    "@agent-loop-snapshot/schema": "workspace:*"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "schema_version": "9.0.0",
+  "snapshot_type": "run-snapshot",
+  "run_id": "run_00000000-0000-4000-8000-000000000005",
+  "created_at": "2026-09-06T02:04:00.000Z",
+  "updated_at": "2026-09-06T02:04:00.000Z",
+  "run_state": "running",
+  "terminal_status": null,
+  "runtime": {
+    "name": "future-runtime",
+    "version": "9.0.0"
+  },
+  "last_sequence": 1,
+  "event_count": 1,
+  "root_event_id": "evt_00000000-0000-4000-8000-000000000041"
+}

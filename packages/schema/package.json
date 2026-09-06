@@ -1,0 +1,23 @@
+{
+  "name": "@agent-loop-snapshot/schema",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "ajv": "^8.17.1"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./protocol": {
+      "types": "./dist/protocol.d.ts",
+      "import": "./dist/protocol.js"
+    },
+    "./schemas/artifact-reference": "./schemas/artifact-reference.schema.json",
+    "./schemas/checkpoint": "./schemas/checkpoint.schema.json",
+    "./schemas/events": "./schemas/events.schema.json",
+    "./schemas/manifest": "./schemas/manifest.schema.json"
+  }
+}

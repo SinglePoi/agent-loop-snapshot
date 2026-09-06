@@ -1,0 +1,12 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/schema" },
+    { "path": "packages/recorder" },
+    { "path": "packages/trace" },
+    { "path": "packages/graph" },
+    { "path": "packages/replay" },
+    { "path": "packages/cli" },
+    { "path": "packages/example-runtime" }
+  ]
+}

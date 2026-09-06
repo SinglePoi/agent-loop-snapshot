@@ -1,0 +1,18 @@
+{
+  "schema_version": "0.1.0",
+  "snapshot_type": "run-snapshot",
+  "run_id": "run_00000000-0000-4000-8000-000000000106",
+  "created_at": "2026-09-06T03:00:00.000Z",
+  "updated_at": "2026-09-06T03:00:15.000Z",
+  "run_state": "finished",
+  "terminal_status": "completed",
+  "runtime": {
+    "name": "example-runtime",
+    "version": "0.1.0",
+    "adapter": "@agent-loop-snapshot/example-runtime"
+  },
+  "last_sequence": 15,
+  "event_count": 15,
+  "root_event_id": "evt_00000000-0000-4000-8000-000000000101",
+  "completed_at": "2026-09-06T03:00:15.000Z"
+}

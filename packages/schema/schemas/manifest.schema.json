@@ -1,0 +1,150 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-loop-snapshot.dev/schema/0.1.0/manifest.schema.json",
+  "title": "Agent Loop Snapshot Manifest",
+  "description": "The atomically committed metadata for one run snapshot.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "snapshot_type",
+    "run_id",
+    "created_at",
+    "updated_at",
+    "run_state",
+    "terminal_status",
+    "runtime",
+    "last_sequence",
+    "event_count"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "0.1.0"
+    },
+    "snapshot_type": {
+      "const": "run-snapshot"
+    },
+    "run_id": {
+      "$ref": "#/$defs/runId"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "run_state": {
+      "enum": ["running", "finished", "incomplete"]
+    },
+    "terminal_status": {
+      "enum": ["completed", "failed", "aborted", null]
+    },
+    "runtime": {
+      "$ref": "#/$defs/runtimeDescriptor"
+    },
+    "last_sequence": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "event_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "root_event_id": {
+      "$ref": "#/$defs/eventId"
+    },
+    "completed_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "run_state": {
+            "const": "running"
+          }
+        },
+        "required": ["run_state"]
+      },
+      "then": {
+        "properties": {
+          "terminal_status": {
+            "const": null
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "run_state": {
+            "const": "incomplete"
+          }
+        },
+        "required": ["run_state"]
+      },
+      "then": {
+        "properties": {
+          "terminal_status": {
+            "const": null
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "run_state": {
+            "const": "finished"
+          }
+        },
+        "required": ["run_state"]
+      },
+      "then": {
+        "required": ["completed_at"],
+        "properties": {
+          "completed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "terminal_status": {
+            "enum": ["completed", "failed", "aborted"]
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "runId": {
+      "type": "string",
+      "pattern": "^run_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "eventId": {
+      "type": "string",
+      "pattern": "^evt_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "runtimeDescriptor": {
+      "type": "object",
+      "required": ["name", "version"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "adapter": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

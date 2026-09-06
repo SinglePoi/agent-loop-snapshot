@@ -1,0 +1,31 @@
+{
+  "name": "agent-loop-snapshot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Portable recording, inspection, visualization, and replay for agent loops.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "packageManager": "pnpm@11.19.0",
+  "engines": {
+    "node": ">=24.20.0 <25",
+    "pnpm": ">=11.19.0 <12"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false",
+    "lint": "eslint .",
+    "format": "prettier --write \"**/*.{js,json,ts,yml,yaml}\"",
+    "format:check": "prettier --check \"**/*.{js,json,ts,yml,yaml}\"",
+    "test": "pnpm build && node --test packages/schema/dist/index.test.js packages/recorder/dist/index.test.js packages/recorder/dist/writer.test.js packages/recorder/dist/artifacts.test.js packages/recorder/dist/checkpoints.test.js packages/recorder/dist/redaction.test.js packages/example-runtime/dist/index.test.js",
+    "check": "pnpm typecheck && pnpm lint && pnpm format:check && pnpm test",
+    "clean": "tsc -b --clean"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "@types/node": "^24.10.1",
+    "eslint": "^9.39.1",
+    "prettier": "^3.6.2",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.46.2"
+  }
+}

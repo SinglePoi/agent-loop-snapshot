@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-loop-snapshot.dev/schema/0.1.0/checkpoint.schema.json",
+  "title": "Agent Loop Snapshot Checkpoint",
+  "description": "A full recoverable state snapshot associated with one event boundary.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "checkpoint_id",
+    "run_id",
+    "created_at",
+    "last_event_id",
+    "sequence",
+    "state_hash",
+    "state"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "0.1.0"
+    },
+    "checkpoint_id": {
+      "$ref": "#/$defs/checkpointId"
+    },
+    "run_id": {
+      "$ref": "#/$defs/runId"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "last_event_id": {
+      "$ref": "#/$defs/eventId"
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "state_hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "state": {
+      "anyOf": [
+        {
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/artifactReference"
+        }
+      ],
+      "description": "Inline recoverable state or a reference to an external serialized state artifact."
+    }
+  },
+  "$defs": {
+    "runId": {
+      "type": "string",
+      "pattern": "^run_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "eventId": {
+      "type": "string",
+      "pattern": "^evt_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "checkpointId": {
+      "type": "string",
+      "pattern": "^cp_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "artifactReference": {
+      "type": "object",
+      "required": ["schema_version", "digest", "media_type", "byte_length"],
+      "properties": {
+        "schema_version": {
+          "const": "0.1.0"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "media_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "byte_length": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "preview": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}
