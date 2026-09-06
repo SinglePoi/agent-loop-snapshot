@@ -11,5 +11,10 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     }
+  },
+  "dependencies": {
+    "@agent-loop-snapshot/graph": "workspace:*",
+    "@agent-loop-snapshot/schema": "workspace:*",
+    "@agent-loop-snapshot/trace": "workspace:*"
   }
 }

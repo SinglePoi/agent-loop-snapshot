@@ -1,0 +1,15 @@
+flowchart TD
+  node_1["run.started [evt_00000000-0000-4000-8000-000000000021]"]
+  node_2["tool.requested [evt_00000000-0000-4000-8000-000000000022]"]
+  node_3["tool.requested [evt_00000000-0000-4000-8000-000000000023]"]
+  node_4["tool.completed [evt_00000000-0000-4000-8000-000000000024]"]
+  node_5["tool.completed [evt_00000000-0000-4000-8000-000000000025]"]
+  node_6["state.changed [evt_00000000-0000-4000-8000-000000000026]"]
+  node_7["run.completed [evt_00000000-0000-4000-8000-000000000027]"]
+  node_1 -->|causal| node_2
+  node_1 -->|causal| node_3
+  node_2 -->|causal| node_4
+  node_3 -->|causal| node_5
+  node_4 -->|causal| node_6
+  node_5 -->|causal| node_6
+  node_6 -->|causal| node_7

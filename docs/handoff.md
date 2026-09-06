@@ -16,6 +16,9 @@
 - ALS-104：实现 Checkpoint Store、可恢复状态边界和状态重建。
 - ALS-105：实现持久化前脱敏流水线。
 - ALS-106：接入首个框架无关 Example Runtime，支持环境变量模型配置、并行只读工具、失败重试和示例快照验收。
+- ALS-201：实现 Trace Loader、查询索引、artifact metadata 加载和结构完整性诊断。
+- ALS-202：实现因果 DAG、调用树、时间线投影、过滤和连续噪声折叠。
+- ALS-203：实现 `validate`、`inspect` 和 `graph` CLI、稳定退出码、JSON 输出和 Mermaid 导出。
 
 ## ALS-103 已实现内容
 
@@ -91,9 +94,65 @@ Example Runtime 提供：
 - 提交固定的脱敏示例快照，覆盖模型调用、并行只读工具、失败重试和 checkpoint，并由测试持续通过 ALS-004 校验器；
 - `examples/example-agent/README.md` 中的本地运行说明，`.env` 不会被提交。
 
-## M1 收尾状态
+## ALS-201 已实现内容
 
-M1 的 ALS-001 至 ALS-106 已完成：固定示例快照已纳入仓库，Node.js 24.20.0 质量门禁已通过，下一步进入 M2 的 ALS-201。
+实现文件：
+
+- `packages/trace/src/index.ts`
+- `packages/trace/src/index.test.ts`
+
+Trace Loader 提供：
+
+- 流式读取 `events.jsonl`，保留完整事件并报告非法 JSONL 行和损坏尾部；
+- 优先读取临时 manifest，支持识别未提交或不完整快照；
+- 读取 checkpoint JSON 和 artifact metadata，不在加载阶段一次性读取 artifact 内容；
+- 建立 event-by-id、children、actor、type 和事件行号索引；
+- 提供按 ID、父子关系、actor、事件类型、sequence 和时间范围查询的稳定 API；
+- 检测 schema 错误、重复/断裂引用、因果环、异常根节点、缺失 artifact 和字节数不匹配；
+- 通过 `readArtifact(digest)` 按需读取 artifact 内容。
+
+## ALS-202 已实现内容
+
+实现文件：
+
+- `packages/graph/src/index.ts`
+- `packages/graph/src/index.test.ts`
+
+Graph Projector 提供：
+
+- 因果 DAG 投影，保留并行分支和多父节点汇合；
+- 调用树投影，按稳定顺序选择主父节点；
+- 按 timestamp、sequence 和 event ID 稳定排序的线性时间线；
+- actor、事件类型、状态和 sequence 范围过滤；
+- 连续模型流式事件和低层噪声事件折叠，并保留全部源 event ID；
+- 每个图节点包含源事件 ID、事件类型、actor、状态和父事件引用。
+
+## ALS-203 已实现内容
+
+实现文件：
+
+- `packages/cli/src/index.ts`
+- `packages/cli/src/index.test.ts`
+
+CLI 提供：
+
+- `validate <snapshot-directory>`：合并 schema、JSONL、checkpoint、artifact 和 Trace 结构诊断；
+- `inspect <snapshot-directory>`：输出运行状态、耗时、模型/工具调用计数、失败代码和事件统计；
+- `graph <snapshot-directory>`：输出因果 DAG、调用树或时间线，默认 Mermaid，也支持 JSON 和文本；
+- `--actor`、`--type`、`--status`、`--min-sequence`、`--max-sequence` 和 `--no-fold-noise` 图过滤选项；
+- `--json` 机器可读模式，路径归一化为快照内相对路径，终端摘要不打印 payload；
+- 退出码：`0` 成功、`2` 快照校验失败、`1` 参数或运行错误。
+
+M2 收尾补充：
+
+- `packages/trace/benchmarks/loader-100k.js` 提供 100k 事件基准，三次运行的中位加载耗时为 2446.90 ms，基线记录见 `docs/benchmarks/trace-loader-100k.md`；
+- `packages/graph/golden/parallel-calls.causal-dag.json` 固定并行分支与多父节点汇合的 DAG 输出；
+- `packages/cli/golden/parallel-calls.causal-dag.mmd` 固定 Mermaid flowchart 输出，并由 CLI 测试回归；
+- 根目录 `pnpm run alsnap -- ...` 提供 workspace 内可直接调用的 CLI 入口。
+
+## 里程碑状态
+
+M1 的 ALS-001 至 ALS-106 已完成，M2 的 ALS-201 至 ALS-203 也已完成。固定示例快照继续作为 Trace Loader、Graph、CLI 和 Replay 的端到端夹具，下一步进入 `ALS-301` Replay Adapter。
 
 ## 验证结果
 
@@ -104,29 +163,29 @@ M1 的 ALS-001 至 ALS-106 已完成：固定示例快照已纳入仓库，Node.
 类型检查：通过
 ESLint：通过
 Prettier：通过
-测试：32 passed, 0 failed
+测试：48 passed, 0 failed
 ```
 
-本机 nvm 当前使用 Node.js 24.20.0；项目约束是 Node.js `>=24.20.0 <25` 和 pnpm `>=11.19.0 <12`。最终质量门禁使用 nvm 的 Node.js 24.20.0 执行。
+本机使用 Node.js 24.20.0；项目约束是 Node.js `>=24.20.0 <25` 和 pnpm `>=11.19.0 <12`。最终质量门禁和 100k Trace Loader 基准均使用本机 Node.js 24.20.0 执行。
 
 ## 下一步
 
-建议继续执行 `ALS-201`：在已完成的快照基础上继续实现 Trace/Graph/CLI 的可用闭环。重点是：
+建议继续执行 `ALS-301`：定义 Agent 与 Tool Replay Adapter。重点是：
 
-1. 保留 ALS-106 的 Example Runtime 作为端到端夹具；
-2. 补齐快照读取、查询、图投影和 CLI 展示；
-3. 继续沿用 Recorder hook 和脱敏边界；
-4. 为后续 Mock Replay 准备稳定的事件查询接口。
+1. 保留 ALS-106 的 Example Runtime 和 CLI 作为端到端夹具；
+2. 定义模型、工具、时钟、随机数和环境读取的 Replay Adapter 接口；
+3. 为每次调用定义稳定 correlation key，并覆盖缺失 adapter 的结构化错误；
+4. 为 ALS-302 Policy Engine 保留真实实现和记录结果实现之间的切换边界。
 
 ## 新会话提示
 
 新会话开始时可直接粘贴：
 
-> 请阅读 `docs/handoff.md` 和 `docs/implementation-plan.md`，基于当前工作区继续执行 ALS-201。保留现有 ALS-001 至 ALS-106 实现，先检查当前代码和测试，再继续实现 Trace/Graph/CLI 的可用闭环。
+> 请阅读 `docs/handoff.md` 和 `docs/implementation-plan.md`，基于当前工作区继续执行 ALS-301。保留现有 ALS-001 至 ALS-203 实现，先检查当前代码和测试，再定义 Agent 与 Tool Replay Adapter 接口。
 
 ## 工作区注意事项
 
-- M1 收尾变更只提交到本地，未执行 push；工作区中的现有文件均属于本项目当前实现。
+- 当前工作区变更只提交到本地，未执行 push；工作区中的现有文件均属于本项目当前实现。
 - 不要使用 destructive git 操作覆盖现有工作区。
 - 现有快照布局见 `docs/adr/0002-runtime-and-storage.md`。
 - 事件身份、顺序、上下文和错误语义见 `docs/adr/0003-event-ordering-and-identity.md`。

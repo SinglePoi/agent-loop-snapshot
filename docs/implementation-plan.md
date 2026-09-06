@@ -34,16 +34,16 @@ MVP 要完成“记录 → 验证 → 可视化 → 安全回放”的最小闭�
 
 以下表格是当前实现基线。TypeScript 技术路线已经确认；其余决策在对应任务中固化。若发生变更，应添加 ADR，而不是仅修改实现。
 
-| 主题 | 当前选择 | 理由 |
-| --- | --- | --- |
-| 首个 SDK | TypeScript / Node.js 当前活跃 LTS | 适合 Agent 工具链、CLI 和 Viewer 共用类型；已由 ADR-0001 确认 |
-| 事件存储 | `events.jsonl` | 追加写、流式读取、崩溃后保留已刷盘事件 |
-| Schema | JSON Schema 2020-12 | 语言无关，可生成校验器和类型 |
-| Workflow 文件 | YAML，按同一 JSON Schema 校验 | 便于人工审阅和修改 |
-| Artifact | SHA-256 内容寻址 | 去重、完整性校验、引用稳定 |
-| 时间 | UTC RFC 3339 + 单调时钟耗时 | 兼顾跨环境比较和准确耗时 |
-| 状态恢复 | 周期性全量 checkpoint + 事件增量 | 优先保证实现和调试简单 |
-| 图模型 | 有向无环图；事件允许多个父节点 | 表达分支、并行与汇合 |
+| 主题          | 当前选择                          | 理由                                                          |
+| ------------- | --------------------------------- | ------------------------------------------------------------- |
+| 首个 SDK      | TypeScript / Node.js 当前活跃 LTS | 适合 Agent 工具链、CLI 和 Viewer 共用类型；已由 ADR-0001 确认 |
+| 事件存储      | `events.jsonl`                    | 追加写、流式读取、崩溃后保留已刷盘事件                        |
+| Schema        | JSON Schema 2020-12               | 语言无关，可生成校验器和类型                                  |
+| Workflow 文件 | YAML，按同一 JSON Schema 校验     | 便于人工审阅和修改                                            |
+| Artifact      | SHA-256 内容寻址                  | 去重、完整性校验、引用稳定                                    |
+| 时间          | UTC RFC 3339 + 单调时钟耗时       | 兼顾跨环境比较和准确耗时                                      |
+| 状态恢复      | 周期性全量 checkpoint + 事件增量  | 优先保证实现和调试简单                                        |
+| 图模型        | 有向无环图；事件允许多个父节点    | 表达分支、并行与汇合                                          |
 
 ## 3. 目标架构与数据流
 
@@ -109,14 +109,14 @@ MVP 事件类型：
 
 ## 4. 里程碑总览
 
-| 里程碑 | 结果 | 入口条件 | 完成条件 |
-| --- | --- | --- | --- |
-| M0 基础与协议 | 仓库、ADR、schema 和固定夹具可用 | 技术路线确认 | CI 能校验合法与非法快照 |
-| M1 快照记录 | 已完成：Example Runtime 能生成完整快照 | M0 完成 | 崩溃恢复、artifact、脱敏和固定示例快照测试通过 |
-| M2 检查与图投影 | CLI 可查看并生成 DAG | M1 完成 | 固定夹具图输出稳定、并行因果关系正确 |
-| M3 安全回放 | Mock Replay 闭环可用 | M2 完成 | 最终状态一致且副作用默认被阻止 |
-| M4 工作流与语义回放 | 另一个 Agent 可按 Workflow IR 执行 | M3 完成 | 跨运行输入可参数化并通过验证器 |
-| M5 工程化发布 | 可迁移、可观测、可发布 | M4 完成 | 文档、兼容矩阵、发布流程齐全 |
+| 里程碑              | 结果                                   | 入口条件     | 完成条件                                       |
+| ------------------- | -------------------------------------- | ------------ | ---------------------------------------------- |
+| M0 基础与协议       | 仓库、ADR、schema 和固定夹具可用       | 技术路线确认 | CI 能校验合法与非法快照                        |
+| M1 快照记录         | 已完成：Example Runtime 能生成完整快照 | M0 完成      | 崩溃恢复、artifact、脱敏和固定示例快照测试通过 |
+| M2 检查与图投影     | CLI 可查看并生成 DAG                   | M1 完成      | 固定夹具图输出稳定、并行因果关系正确           |
+| M3 安全回放         | Mock Replay 闭环可用                   | M2 完成      | 最终状态一致且副作用默认被阻止                 |
+| M4 工作流与语义回放 | 另一个 Agent 可按 Workflow IR 执行     | M3 完成      | 跨运行输入可参数化并通过验证器                 |
+| M5 工程化发布       | 可迁移、可观测、可发布                 | M4 完成      | 文档、兼容矩阵、发布流程齐全                   |
 
 ## 5. 任务依赖图
 
@@ -326,12 +326,12 @@ flowchart LR
 
 - 已提交固定的脱敏示例快照：`packages/example-runtime/fixtures/example-run/`；
 - 示例快照覆盖模型调用、并行只读工具、工具失败重试、状态变更和 checkpoint，并通过 ALS-004 校验器；
-- Node.js 24.20.0、pnpm 11.19.0 下的完整质量门禁通过，测试结果为 32 passed、0 failed；
-- M1 已完成，后续进入 ALS-201 Trace Loader 和查询模型。
+- Node.js 24.20.0、pnpm 11.19.0 下的 M1 完整质量门禁通过，历史记录为 32 passed、0 failed；
+- M1 已完成；M2 的 ALS-201 Trace Loader、ALS-202 Graph Projector 和 ALS-203 CLI 也已完成，后续进入 ALS-301 Replay Adapter。
 
 ### M2：检查与图投影
 
-#### ALS-201：实现 Trace Loader 和查询模型
+#### ALS-201：实现 Trace Loader 和查询模型（已完成）
 
 **依赖**：ALS-106
 
@@ -347,7 +347,15 @@ flowchart LR
 - 损坏项以诊断列表返回，包含严重级别和位置。
 - 100k 事件性能基线被记录，后续可以回归比较。
 
-#### ALS-202：实现 Graph Projector
+**完成记录（2026-09-06）**
+
+- 已实现流式 JSONL loader、manifest/checkpoint/artifact metadata 加载和查询索引；
+- 已覆盖事件 ID、children、actor、type、sequence 和时间范围查询；
+- 已加入 schema、JSONL 尾部、因果环、断裂父引用、缺失 artifact 和字节数不匹配诊断；
+- 已使用现有 golden fixtures 和临时损坏快照测试，完整质量门禁通过；
+- 已增加 100k 事件基准，当前本机中位加载耗时为 2446.90 ms，约 40868 events/s，记录见 `docs/benchmarks/trace-loader-100k.md`。
+
+#### ALS-202：实现 Graph Projector（已完成）
 
 **依赖**：ALS-201
 
@@ -363,7 +371,14 @@ flowchart LR
 - 每个图节点可追溯到原始 event ID。
 - 固定夹具的图快照测试稳定通过。
 
-#### ALS-203：实现 `validate`、`inspect` 和 `graph` CLI
+**完成记录（2026-09-06）**
+
+- 已实现因果 DAG、调用树和线性时间线投影；
+- 已支持 actor、事件类型、状态和 sequence 范围过滤；
+- 已折叠连续模型流式事件和低层噪声，并保留源 event ID；
+- 已验证并行分支、多父节点汇合，并新增 `packages/graph/golden/parallel-calls.causal-dag.json` 稳定输出回归，完整质量门禁通过。
+
+#### ALS-203：实现 `validate`、`inspect` 和 `graph` CLI（已完成）
 
 **依赖**：ALS-202
 
@@ -378,6 +393,22 @@ flowchart LR
 - 命令退出码区分成功、校验失败和运行错误。
 - Mermaid 输出可被标准渲染器解析。
 - 默认终端输出不泄漏被脱敏数据。
+
+**完成记录（2026-09-06）**
+
+- 已实现 `validate`、`inspect` 和 `graph` 命令，并接入 Trace Loader 和 Graph Projector；
+- 已提供 `0` 成功、`2` 校验失败、`1` 参数/运行错误的稳定退出码；
+- 已提供 JSON 机器输出、Mermaid DAG、调用树和时间线导出，以及 graph 过滤参数；
+- `inspect` 默认只输出摘要、错误代码和诊断，不输出事件 payload；
+- 已增加确定性的 Mermaid flowchart 输出回归，并通过 JSON/文本/退出码测试；
+- 本机 Node.js 24.20.0、pnpm 11.19.0 下完整质量门禁通过，测试结果为 48 passed、0 failed。
+
+**M2 收尾记录（2026-09-06）**
+
+- 已完成 Trace Loader 的 100k 事件性能基线，三次运行中位加载耗时为 2446.90 ms，基线详情见 `docs/benchmarks/trace-loader-100k.md`；
+- 已提交并行分支/汇合 DAG 和 Mermaid flowchart 的 golden 输出，防止投影与导出格式漂移；
+- 已提供 `pnpm run alsnap -- ...` workspace CLI 入口；
+- 本机 Node.js 24.20.0、pnpm 11.19.0 下最终质量门禁为 48 passed、0 failed，M2 核心任务 ALS-201 至 ALS-203 收尾完成；ALS-204 Viewer 按计划延期。
 
 #### ALS-204：构建只读 Viewer
 
@@ -601,14 +632,14 @@ flowchart LR
 
 ## 8. 测试策略
 
-| 层次 | 测试重点 |
-| --- | --- |
-| Schema | 合法/非法事件、未知版本、缺失字段、引用完整性 |
-| Recorder | 并发 ID、顺序、刷盘、中断恢复、生命周期状态机 |
-| Security | 嵌套脱敏、错误信息泄漏、路径穿越、副作用拦截 |
-| Graph | 并行、汇合、重试、孤儿、环检测、稳定投影 |
-| Replay | correlation 匹配、状态一致、失败重试、策略拒绝 |
-| Workflow | 参数化、输出 schema、分支条件、跨 adapter 兼容 |
+| 层次        | 测试重点                                              |
+| ----------- | ----------------------------------------------------- |
+| Schema      | 合法/非法事件、未知版本、缺失字段、引用完整性         |
+| Recorder    | 并发 ID、顺序、刷盘、中断恢复、生命周期状态机         |
+| Security    | 嵌套脱敏、错误信息泄漏、路径穿越、副作用拦截          |
+| Graph       | 并行、汇合、重试、孤儿、环检测、稳定投影              |
+| Replay      | correlation 匹配、状态一致、失败重试、策略拒绝        |
+| Workflow    | 参数化、输出 schema、分支条件、跨 adapter 兼容        |
 | Performance | 100k 事件读取、索引内存、artifact 延迟、Viewer 虚拟化 |
 
 每个里程碑至少保留一份脱敏后的端到端 golden snapshot，作为后续兼容性测试输入。

@@ -2,7 +2,7 @@
 
 Agent Loop Snapshot 是一个面向 Agent Runtime 的运行记录、可视化与回放工具。它把一次 Agent Loop 中的模型调用、工具调用、状态变化、检查点和产物保存为可移植快照，并可进一步生成流程图或编译为可执行工作流，让另一个 Agent 在明确的权限和验证规则下复现任务。
 
-> 当前状态：基础协议、Recorder、耐崩溃写入、Artifact Store 和 Checkpoint Store 已实现，尚未发布可用版本。
+> 当前状态：基础协议、Recorder、耐崩溃写入、Artifact Store、Checkpoint Store、Trace Loader、Graph Projector 和 CLI 已实现；Replay 仍在开发中，尚未发布可用版本。
 
 ## 项目目标
 
@@ -41,6 +41,12 @@ Recorder 包提供 `startRun`、`appendEvent`、`checkpoint`、`completeRun` 和
 `CheckpointStore.open(<snapshot>/checkpoints)` 将全量可恢复状态按最后事件的 `sequence` 写入 `checkpoints/<sequence>.json`，使用临时文件和原子重命名提交。`SnapshotWriter.asInterceptor()` 会在 Recorder 创建 checkpoint 后自动持久化；`reconstructState()` 优先从最近且哈希有效的 checkpoint 应用后续 `state.changed` 事件，checkpoint 缺失、损坏或哈希不一致时会降级为从事件流重建。可恢复状态边界只包含显式 `state.changed` 的 set、merge、append 和 delete 操作，模型调用、工具结果和决策摘要属于观察状态。
 
 `RedactionPipeline` 支持 JSON Pointer 字段规则、数组通配符、正则规则和自定义 redactor。通过 `asInterceptor()` 接入 Recorder 时，脱敏在 JSONL 持久化前执行，并只在 `security.redactions` 中记录类别、路径和策略。`createDefaultRedactionPipeline()` 覆盖常见 API key、Bearer authorization 和敏感字段；JSON 或文本 artifact 应在 `ArtifactStore.put()` 前通过 `redactArtifact()` 处理，二进制内容不会被猜测解码。
+
+`Trace` 包的 `loadTraceSnapshot()` 流式读取 `events.jsonl`，加载 manifest、checkpoint 和 artifact metadata，并建立 event、children、actor 和 type 索引。查询模型支持按事件 ID、父子关系、actor、类型、sequence 和时间范围检索；加载阶段只读取 artifact metadata，内容通过 `readArtifact()` 按需读取。加载器会返回 schema、JSONL、因果关系和 artifact 完整性诊断，未知事件类型仍作为 opaque event 保留。
+
+`Graph` 包提供因果 DAG、调用树和线性时间线投影。DAG 保留并行分支和多父节点汇合；投影支持 actor、事件类型、状态和 sequence 范围过滤，并默认折叠连续模型流式事件和低层噪声，同时保留每个图节点对应的源 event ID。
+
+`CLI` 包提供 `alsnap validate`、`alsnap inspect` 和 `alsnap graph`。`validate` 检查快照并输出诊断，`inspect` 输出不包含 payload 的运行摘要，`graph` 默认导出 Mermaid DAG，也支持调用树、时间线和 JSON。退出码为 `0`（成功）、`2`（快照校验失败）和 `1`（参数或运行错误）；所有命令支持 `--json` 机器可读输出。
 
 ## 总体架构
 
@@ -109,29 +115,37 @@ apps/
 
 `examples/example-agent/.env.example` 提供了模型环境配置模板。复制为本地 `.env` 后填写 `ALS_MODEL_API_KEY` 和 `ALS_MODEL_NAME`，再运行 `packages/example-runtime` 的 CLI；`.env` 已被 git 忽略。
 
-当前 workspace 已完成基础骨架。开发环境使用 Node.js 24.20.0 和 pnpm 11.19.0；依赖安装、构建、类型检查、lint、格式检查和测试可以通过以下命令执行：
+当前 workspace 已完成基础协议、快照记录、Trace、Graph 和 CLI。开发环境使用 Node.js 24.20.0 和 pnpm 11.19.0；依赖安装、构建、类型检查、lint、格式检查和测试可以通过以下命令执行：
 
 ```bash
 pnpm install
 pnpm run check
+pnpm run benchmark:trace
 ```
 
-CI 使用同一套 `pnpm run check` 质量门禁。核心包和 Example Runtime 已提供可构建入口，后续任务将在这些包中逐步实现协议和运行时能力。
+CI 使用同一套 `pnpm run check` 质量门禁。`pnpm run benchmark:trace` 用于复测 100k Trace Loader 基线；核心包和 Example Runtime 已提供可构建入口，后续任务将进入安全回放能力。
 
 TypeScript 技术决策记录在 [ADR-0001](docs/adr/0001-use-typescript.md)。未来可以依据相同 JSON Schema 增加 Python SDK，但不会为此复制或分叉快照协议。
 
-## 计划中的 CLI
+## CLI
 
-以下命令用于定义产品边界，尚未实现：
+基础检查和图导出命令已经可用：
 
 ```bash
-alsnap validate ./runs/run-123
-alsnap inspect ./runs/run-123
-alsnap graph ./runs/run-123 --format mermaid
-alsnap replay ./runs/run-123 --mode mock
-alsnap replay ./runs/run-123 --mode verified
-alsnap workflow compile ./runs/run-123
-alsnap workflow run ./runs/run-123/workflow.yaml
+pnpm run alsnap -- validate ./runs/run-123
+pnpm run alsnap -- inspect ./runs/run-123
+pnpm run alsnap -- graph ./runs/run-123 --format mermaid
+pnpm run alsnap -- graph ./runs/run-123 --kind timeline --format json
+pnpm run alsnap -- graph ./runs/run-123 --actor agent.main --type tool.completed
+```
+
+回放和 Workflow 命令仍在规划中：
+
+```bash
+pnpm run alsnap -- replay ./runs/run-123 --mode mock
+pnpm run alsnap -- replay ./runs/run-123 --mode verified
+pnpm run alsnap -- workflow compile ./runs/run-123
+pnpm run alsnap -- workflow run ./runs/run-123/workflow.yaml
 ```
 
 ## MVP 完成标准
@@ -171,7 +185,3 @@ alsnap workflow run ./runs/run-123/workflow.yaml
 ## 参与开发
 
 项目进入编码阶段后，每个任务应关联一个 `ALS-*` 编号，并在合并前满足该任务的验收标准。协议或安全语义发生变化时，需要同时更新 schema、迁移测试和相关文档。
-
-## License
-
-待项目初始化时确定。

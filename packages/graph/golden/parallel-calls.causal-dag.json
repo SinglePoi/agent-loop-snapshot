@@ -1,0 +1,164 @@
+{
+  "kind": "causal-dag",
+  "nodes": [
+    {
+      "id": "evt_00000000-0000-4000-8000-000000000021",
+      "eventId": "evt_00000000-0000-4000-8000-000000000021",
+      "eventIds": ["evt_00000000-0000-4000-8000-000000000021"],
+      "sequence": 1,
+      "sequenceEnd": 1,
+      "timestamp": "2026-09-06T02:02:00.000Z",
+      "timestampEnd": "2026-09-06T02:02:00.000Z",
+      "actor": "agent.main",
+      "actors": ["agent.main"],
+      "type": "run.started",
+      "types": ["run.started"],
+      "status": "started",
+      "label": "run.started",
+      "parentEventIds": [],
+      "folded": false
+    },
+    {
+      "id": "evt_00000000-0000-4000-8000-000000000022",
+      "eventId": "evt_00000000-0000-4000-8000-000000000022",
+      "eventIds": ["evt_00000000-0000-4000-8000-000000000022"],
+      "sequence": 2,
+      "sequenceEnd": 2,
+      "timestamp": "2026-09-06T02:02:00.500Z",
+      "timestampEnd": "2026-09-06T02:02:00.500Z",
+      "actor": "agent.main",
+      "actors": ["agent.main"],
+      "type": "tool.requested",
+      "types": ["tool.requested"],
+      "status": "started",
+      "label": "tool.requested",
+      "parentEventIds": ["evt_00000000-0000-4000-8000-000000000021"],
+      "folded": false
+    },
+    {
+      "id": "evt_00000000-0000-4000-8000-000000000023",
+      "eventId": "evt_00000000-0000-4000-8000-000000000023",
+      "eventIds": ["evt_00000000-0000-4000-8000-000000000023"],
+      "sequence": 3,
+      "sequenceEnd": 3,
+      "timestamp": "2026-09-06T02:02:00.500Z",
+      "timestampEnd": "2026-09-06T02:02:00.500Z",
+      "actor": "agent.main",
+      "actors": ["agent.main"],
+      "type": "tool.requested",
+      "types": ["tool.requested"],
+      "status": "started",
+      "label": "tool.requested",
+      "parentEventIds": ["evt_00000000-0000-4000-8000-000000000021"],
+      "folded": false
+    },
+    {
+      "id": "evt_00000000-0000-4000-8000-000000000024",
+      "eventId": "evt_00000000-0000-4000-8000-000000000024",
+      "eventIds": ["evt_00000000-0000-4000-8000-000000000024"],
+      "sequence": 4,
+      "sequenceEnd": 4,
+      "timestamp": "2026-09-06T02:02:01.500Z",
+      "timestampEnd": "2026-09-06T02:02:01.500Z",
+      "actor": "read_file",
+      "actors": ["read_file"],
+      "type": "tool.completed",
+      "types": ["tool.completed"],
+      "status": "completed",
+      "label": "tool.completed",
+      "parentEventIds": ["evt_00000000-0000-4000-8000-000000000022"],
+      "folded": false
+    },
+    {
+      "id": "evt_00000000-0000-4000-8000-000000000025",
+      "eventId": "evt_00000000-0000-4000-8000-000000000025",
+      "eventIds": ["evt_00000000-0000-4000-8000-000000000025"],
+      "sequence": 5,
+      "sequenceEnd": 5,
+      "timestamp": "2026-09-06T02:02:01.500Z",
+      "timestampEnd": "2026-09-06T02:02:01.500Z",
+      "actor": "read_file",
+      "actors": ["read_file"],
+      "type": "tool.completed",
+      "types": ["tool.completed"],
+      "status": "completed",
+      "label": "tool.completed",
+      "parentEventIds": ["evt_00000000-0000-4000-8000-000000000023"],
+      "folded": false
+    },
+    {
+      "id": "evt_00000000-0000-4000-8000-000000000026",
+      "eventId": "evt_00000000-0000-4000-8000-000000000026",
+      "eventIds": ["evt_00000000-0000-4000-8000-000000000026"],
+      "sequence": 6,
+      "sequenceEnd": 6,
+      "timestamp": "2026-09-06T02:02:02.000Z",
+      "timestampEnd": "2026-09-06T02:02:02.000Z",
+      "actor": "agent.main",
+      "actors": ["agent.main"],
+      "type": "state.changed",
+      "types": ["state.changed"],
+      "status": "changed",
+      "label": "state.changed",
+      "parentEventIds": [
+        "evt_00000000-0000-4000-8000-000000000024",
+        "evt_00000000-0000-4000-8000-000000000025"
+      ],
+      "folded": false
+    },
+    {
+      "id": "evt_00000000-0000-4000-8000-000000000027",
+      "eventId": "evt_00000000-0000-4000-8000-000000000027",
+      "eventIds": ["evt_00000000-0000-4000-8000-000000000027"],
+      "sequence": 7,
+      "sequenceEnd": 7,
+      "timestamp": "2026-09-06T02:02:04.000Z",
+      "timestampEnd": "2026-09-06T02:02:04.000Z",
+      "actor": "agent.main",
+      "actors": ["agent.main"],
+      "type": "run.completed",
+      "types": ["run.completed"],
+      "status": "completed",
+      "label": "run.completed",
+      "parentEventIds": ["evt_00000000-0000-4000-8000-000000000026"],
+      "folded": false
+    }
+  ],
+  "edges": [
+    {
+      "from": "evt_00000000-0000-4000-8000-000000000021",
+      "to": "evt_00000000-0000-4000-8000-000000000022",
+      "kind": "causal"
+    },
+    {
+      "from": "evt_00000000-0000-4000-8000-000000000021",
+      "to": "evt_00000000-0000-4000-8000-000000000023",
+      "kind": "causal"
+    },
+    {
+      "from": "evt_00000000-0000-4000-8000-000000000022",
+      "to": "evt_00000000-0000-4000-8000-000000000024",
+      "kind": "causal"
+    },
+    {
+      "from": "evt_00000000-0000-4000-8000-000000000023",
+      "to": "evt_00000000-0000-4000-8000-000000000025",
+      "kind": "causal"
+    },
+    {
+      "from": "evt_00000000-0000-4000-8000-000000000024",
+      "to": "evt_00000000-0000-4000-8000-000000000026",
+      "kind": "causal"
+    },
+    {
+      "from": "evt_00000000-0000-4000-8000-000000000025",
+      "to": "evt_00000000-0000-4000-8000-000000000026",
+      "kind": "causal"
+    },
+    {
+      "from": "evt_00000000-0000-4000-8000-000000000026",
+      "to": "evt_00000000-0000-4000-8000-000000000027",
+      "kind": "causal"
+    }
+  ]
+}

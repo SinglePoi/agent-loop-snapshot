@@ -3,6 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "dependencies": {
+    "@agent-loop-snapshot/schema": "workspace:*",
+    "@agent-loop-snapshot/trace": "workspace:*"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
