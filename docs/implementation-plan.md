@@ -401,14 +401,14 @@ flowchart LR
 - 已提供 JSON 机器输出、Mermaid DAG、调用树和时间线导出，以及 graph 过滤参数；
 - `inspect` 默认只输出摘要、错误代码和诊断，不输出事件 payload；
 - 已增加确定性的 Mermaid flowchart 输出回归，并通过 JSON/文本/退出码测试；
-- 本机 Node.js 24.20.0、pnpm 11.19.0 下完整质量门禁通过，测试结果为 48 passed、0 failed。
+- 本机 Node.js 24.20.0、pnpm 11.19.0 下完整质量门禁通过，测试结果为 60 passed、0 failed。
 
 **M2 收尾记录（2026-09-06）**
 
 - 已完成 Trace Loader 的 100k 事件性能基线，三次运行中位加载耗时为 2446.90 ms，基线详情见 `docs/benchmarks/trace-loader-100k.md`；
 - 已提交并行分支/汇合 DAG 和 Mermaid flowchart 的 golden 输出，防止投影与导出格式漂移；
 - 已提供 `pnpm run alsnap -- ...` workspace CLI 入口；
-- 本机 Node.js 24.20.0、pnpm 11.19.0 下最终质量门禁为 48 passed、0 failed，M2 核心任务 ALS-201 至 ALS-203 收尾完成；ALS-204 Viewer 按计划延期。
+- 本机 Node.js 24.20.0、pnpm 11.19.0 下最终质量门禁为 60 passed、0 failed，M2 核心任务 ALS-201 至 ALS-203 收尾完成；ALS-204 Viewer 按计划延期。
 
 #### ALS-204：构建只读 Viewer
 
@@ -428,7 +428,7 @@ flowchart LR
 
 ### M3：安全回放
 
-#### ALS-301：定义 Agent 与 Tool Replay Adapter
+#### ALS-301：定义 Agent 与 Tool Replay Adapter（已完成）
 
 **依赖**：ALS-201
 
@@ -444,7 +444,15 @@ flowchart LR
 - 缺少 adapter 时返回可诊断错误。
 - adapter 可以声明版本、能力和副作用级别。
 
-#### ALS-302：实现副作用 Policy Engine
+**完成记录（2026-09-07）**
+
+- `@agent-loop-snapshot/replay` 已定义模型、工具、时钟、随机数和环境读取的供应商无关 adapter 协议；
+- `createReplayCorrelationKey()` 依据稳定的调用种类、目标和逻辑序号生成 correlation key，重试通过单独的 `attempt` 表示；
+- `ReplayAdapterRegistry` 可在 `live` 与 `recorded` 实现之间切换，并对缺失 adapter、重复工具 adapter 和缺少声明能力返回结构化诊断；
+- `createRecordedReplayAdapterSet()` 可从 Trace 构造只读 recorded-result adapter，按 correlation key 和 attempt 返回历史成功或失败结果，不执行历史副作用；
+- 已使用固定 Example Runtime snapshot 覆盖 recorded adapter 的模型结果、工具重试和缺失记录路径。
+
+#### ALS-302：实现副作用 Policy Engine（已完成）
 
 **依赖**：ALS-301
 
@@ -460,7 +468,15 @@ flowchart LR
 - 历史授权不会被继承为新授权。
 - 拒绝操作不会调用底层工具。
 
-#### ALS-303：实现 Mock Replay
+**完成记录（2026-09-07）**
+
+- `ReplayPolicyEngine` 根据 adapter mode、类型、目标与副作用级别匹配首条策略规则，支持 allow、deny、dry-run 与 require-approval；
+- 安全默认策略仅允许 recorded result，以及 live 的 `read_only` 调用；live 写入与 destructive 调用默认拒绝；
+- `require_approval` 仅接受与当前 action ID 匹配的新审批对象，Policy Engine 不读取或继承源 Trace 的授权信息；
+- `execute()` 在 allow 前先交给审计 sink，deny、dry-run 和 require-approval 均不会调用底层 operation；
+- `RecorderReplayPolicyAuditSink` 将决策及 action 元数据作为 `decision.recorded` 事件写入新建 Replay Trace，且新增测试覆盖默认拒绝、当前审批、dry-run 与审计顺序。
+
+#### ALS-303：实现 Mock Replay（已完成）
 
 **依赖**：ALS-302
 
@@ -476,7 +492,15 @@ flowchart LR
 - Mock Replay 不产生文件、网络或外部系统副作用。
 - 调用顺序或参数不匹配时给出结构化差异。
 
-#### ALS-304：实现 Checkpoint Resume 和 Verified Replay
+**完成记录（2026-09-07）**
+
+- `MockReplayRunner` 仅构造并解析 recorded-result adapter，绝不解析或调用 live adapter；每次 recorded 调用均通过 `ReplayPolicyEngine.execute()`；
+- Runner 会在新 Run 的输入和最终输出中关联 source run ID，复制可恢复的 `state.changed` 事件，并在成功时写入 checkpoint 与 terminal manifest；
+- 固定 Example Runtime snapshot 的模型调用、并行只读工具、失败重试均被记录到新 Replay Trace，最终状态哈希与源 Run 一致；
+- 提供可选 call plan；调用数量、种类、目标、correlation key、attempt 或输入不一致时，Runner 在调用 recorded adapter 前返回结构化差异并终止；
+- recorded adapter 与 Policy Engine 均不执行文件、网络或外部系统操作，新的 policy audit 事件保留在 Replay Trace 中。
+
+#### ALS-304：实现 Checkpoint Resume 和 Verified Replay（已完成）
 
 **依赖**：ALS-303
 
@@ -491,6 +515,14 @@ flowchart LR
 - 用户能明确选择起始 checkpoint。
 - 时间戳、随机 ID 等易变字段可通过声明式规则忽略。
 - 所有真实副作用都经过 ALS-302。
+
+**完成记录（2026-09-07）**
+
+- `selectReplayResumePoint()` 允许调用者通过 checkpoint ID 选择源快照的恢复点，验证 source event 绑定与 state hash，并将 checkpoint state 作为新 Replay Run 的初始 checkpoint；
+- `VerifiedReplayRunner` 使用显式的 live adapter registry 执行恢复点后的模型/工具调用；每次调用都由 `ReplayPolicyEngine.execute()` 守卫并写入新的 policy audit 事件；
+- 输出验证支持 JSON Pointer（单段 `*` 通配符）忽略规则、可选空白规范化的文本比较、声明文件 SHA-256 比较和同步/异步自定义断言；
+- 结构化差异区分结果状态、类型、值、文本、文件哈希与断言失败；验证差异不会掩盖为成功输出；
+- 固定 Example Runtime snapshot 覆盖完全匹配的 live replay、checkpoint resume、易变字段忽略、文本/哈希规则及不匹配输出/自定义断言。
 
 ### M4：Workflow IR 与 Semantic Replay
 

@@ -58,12 +58,12 @@ test('loads artifact metadata and reports a mismatched artifact size', async () 
   assert.ok(metadata);
   assert.equal(metadata.exists, true);
   assert.equal(metadata.byte_length, 16);
-  assert.equal(metadata.actual_byte_length, 19);
+  assert.notEqual(metadata.actual_byte_length, metadata.byte_length);
   assert.equal(metadata.media_types[0], 'application/json');
   assert.ok(
     snapshot.diagnostics.some((diagnostic) => diagnostic.code === 'ARTIFACT_SIZE_MISMATCH'),
   );
-  assert.equal((await snapshot.readArtifact(digest)).byteLength, 19);
+  assert.equal((await snapshot.readArtifact(digest)).byteLength, metadata.actual_byte_length);
 });
 
 test('retains unknown-version events and reports schema diagnostics', async () => {

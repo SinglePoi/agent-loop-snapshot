@@ -32,6 +32,12 @@ importers:
       '@agent-loop-snapshot/graph':
         specifier: workspace:*
         version: link:../graph
+      '@agent-loop-snapshot/recorder':
+        specifier: workspace:*
+        version: link:../recorder
+      '@agent-loop-snapshot/replay':
+        specifier: workspace:*
+        version: link:../replay
       '@agent-loop-snapshot/schema':
         specifier: workspace:*
         version: link:../schema
@@ -63,7 +69,17 @@ importers:
         specifier: workspace:*
         version: link:../schema
 
-  packages/replay: {}
+  packages/replay:
+    dependencies:
+      '@agent-loop-snapshot/recorder':
+        specifier: workspace:*
+        version: link:../recorder
+      '@agent-loop-snapshot/schema':
+        specifier: workspace:*
+        version: link:../schema
+      '@agent-loop-snapshot/trace':
+        specifier: workspace:*
+        version: link:../trace
 
   packages/schema:
     dependencies:

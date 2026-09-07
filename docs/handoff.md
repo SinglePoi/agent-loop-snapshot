@@ -19,6 +19,10 @@
 - ALS-201：实现 Trace Loader、查询索引、artifact metadata 加载和结构完整性诊断。
 - ALS-202：实现因果 DAG、调用树、时间线投影、过滤和连续噪声折叠。
 - ALS-203：实现 `validate`、`inspect` 和 `graph` CLI、稳定退出码、JSON 输出和 Mermaid 导出。
+- ALS-301：实现框架无关的 Replay Adapter 协议、稳定 correlation key、live/recorded adapter 切换与记录结果适配器。
+- ALS-302：实现副作用 Policy Engine、当前授权检查、执行守卫与 Replay Trace 审计事件。
+- ALS-303：实现基于 recorded-result adapter 的 Mock Replay Runner、新 Replay Trace 与结构化调用差异。
+- ALS-304：实现 checkpoint resume、经策略守卫的 live adapter 验证回放，以及声明式差异比较。
 
 ## ALS-103 已实现内容
 
@@ -152,7 +156,7 @@ M2 收尾补充：
 
 ## 里程碑状态
 
-M1 的 ALS-001 至 ALS-106 已完成，M2 的 ALS-201 至 ALS-203 也已完成。固定示例快照继续作为 Trace Loader、Graph、CLI 和 Replay 的端到端夹具，下一步进入 `ALS-301` Replay Adapter。
+M1 的 ALS-001 至 ALS-106、M2 的 ALS-201 至 ALS-203，以及 M3 的 ALS-301 至 ALS-304 均已完成。M3 收尾已补齐：`alsnap replay --mode mock --output <directory>` 会落盘一个新快照，artifact-backed state 会被物化，且 Windows 与 Unix 的换行差异不再导致测试失败。固定示例快照继续作为 Trace Loader、Graph、CLI 和 Replay 的端到端夹具，下一步进入 `ALS-401` Workflow IR。
 
 ## 验证结果
 
@@ -163,25 +167,25 @@ M1 的 ALS-001 至 ALS-106 已完成，M2 的 ALS-201 至 ALS-203 也已完成�
 类型检查：通过
 ESLint：通过
 Prettier：通过
-测试：48 passed, 0 failed
+测试：60 passed, 0 failed
 ```
 
 本机使用 Node.js 24.20.0；项目约束是 Node.js `>=24.20.0 <25` 和 pnpm `>=11.19.0 <12`。最终质量门禁和 100k Trace Loader 基准均使用本机 Node.js 24.20.0 执行。
 
 ## 下一步
 
-建议继续执行 `ALS-301`：定义 Agent 与 Tool Replay Adapter。重点是：
+建议继续执行 `ALS-401`：定义 Workflow IR v0.1。重点是：
 
 1. 保留 ALS-106 的 Example Runtime 和 CLI 作为端到端夹具；
-2. 定义模型、工具、时钟、随机数和环境读取的 Replay Adapter 接口；
-3. 为每次调用定义稳定 correlation key，并覆盖缺失 adapter 的结构化错误；
-4. 为 ALS-302 Policy Engine 保留真实实现和记录结果实现之间的切换边界。
+2. 定义 input、node、dependency、condition、retry、output schema、verifier 与权限元数据；
+3. 支持 agent task、tool call、verification、human approval 四类节点，并表达分支、并行、汇合、重试和失败终止；
+4. 使 YAML 与 JSON 共享一份 schema，并保证所有节点都有明确成功条件。
 
 ## 新会话提示
 
 新会话开始时可直接粘贴：
 
-> 请阅读 `docs/handoff.md` 和 `docs/implementation-plan.md`，基于当前工作区继续执行 ALS-301。保留现有 ALS-001 至 ALS-203 实现，先检查当前代码和测试，再定义 Agent 与 Tool Replay Adapter 接口。
+> 请阅读 `docs/handoff.md` 和 `docs/implementation-plan.md`，基于当前工作区继续执行 ALS-401。保留现有 ALS-001 至 ALS-304 实现，先检查当前代码和测试，再定义 Workflow IR v0.1。
 
 ## 工作区注意事项
 
