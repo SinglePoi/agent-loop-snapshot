@@ -1,0 +1,326 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-loop-snapshot.dev/schema/0.1.0/workflow.schema.json",
+  "title": "Agent Loop Snapshot Workflow IR",
+  "description": "A portable declarative workflow. JSON and YAML are parsed into this document before validation.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "workflow_type",
+    "workflow_id",
+    "name",
+    "inputs",
+    "nodes",
+    "outputs"
+  ],
+  "properties": {
+    "schema_version": { "const": "0.1.0" },
+    "workflow_type": { "const": "agent-workflow" },
+    "workflow_id": { "$ref": "#/$defs/workflowId" },
+    "name": { "type": "string", "minLength": 1 },
+    "description": { "type": "string", "minLength": 1 },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/inputDefinition" }
+    },
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/node" }
+    },
+    "outputs": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/outputDefinition" }
+    },
+    "verifiers": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/verifier" }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "workflowId": {
+      "type": "string",
+      "pattern": "^wf_[a-z][a-z0-9_-]{0,63}$"
+    },
+    "nodeId": {
+      "type": "string",
+      "pattern": "^node_[a-z][a-z0-9_-]{0,63}$"
+    },
+    "verifierId": {
+      "type": "string",
+      "pattern": "^verifier_[a-z][a-z0-9_-]{0,63}$"
+    },
+    "jsonValue": {
+      "anyOf": [
+        { "type": ["string", "number", "boolean", "null"] },
+        { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+        { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
+      ]
+    },
+    "jsonSchema": {
+      "anyOf": [{ "type": "boolean" }, { "type": "object" }]
+    },
+    "inputDefinition": {
+      "type": "object",
+      "required": ["schema"],
+      "properties": {
+        "schema": { "$ref": "#/$defs/jsonSchema" },
+        "description": { "type": "string", "minLength": 1 },
+        "required": { "type": "boolean" },
+        "default": { "$ref": "#/$defs/jsonValue" }
+      },
+      "additionalProperties": false
+    },
+    "valueReference": {
+      "type": "object",
+      "required": ["kind", "name"],
+      "properties": {
+        "kind": { "enum": ["input", "node_output"] },
+        "name": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "pattern": "^(|/(?:[^~/]|~[01])*)$" }
+      },
+      "additionalProperties": false
+    },
+    "condition": {
+      "type": "object",
+      "required": ["from", "operator"],
+      "properties": {
+        "from": { "$ref": "#/$defs/valueReference" },
+        "operator": { "enum": ["exists", "equals", "not_equals", "truthy", "falsy"] },
+        "value": { "$ref": "#/$defs/jsonValue" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "operator": { "enum": ["equals", "not_equals"] } },
+            "required": ["operator"]
+          },
+          "then": {
+            "required": ["value"],
+            "properties": { "value": { "$ref": "#/$defs/jsonValue" } }
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "dependency": {
+      "type": "object",
+      "required": ["node_id", "on"],
+      "properties": {
+        "node_id": { "$ref": "#/$defs/nodeId" },
+        "on": { "enum": ["success", "failure", "always"] }
+      },
+      "additionalProperties": false
+    },
+    "retryPolicy": {
+      "type": "object",
+      "required": ["max_attempts"],
+      "properties": {
+        "max_attempts": { "type": "integer", "minimum": 1 },
+        "backoff_ms": { "type": "integer", "minimum": 0 },
+        "retry_on": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "permissions": {
+      "type": "object",
+      "required": ["side_effect"],
+      "properties": {
+        "side_effect": {
+          "enum": ["read_only", "workspace_write", "external_write", "destructive"]
+        },
+        "capabilities": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "targets": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "requires_approval": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "successCondition": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["kind", "condition"],
+          "properties": {
+            "kind": { "const": "condition" },
+            "condition": { "$ref": "#/$defs/condition" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["kind", "schema"],
+          "properties": {
+            "kind": { "const": "output_schema" },
+            "schema": { "$ref": "#/$defs/jsonSchema" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["kind", "verifier_id"],
+          "properties": {
+            "kind": { "const": "verifier" },
+            "verifier_id": { "$ref": "#/$defs/verifierId" }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "nodeBase": {
+      "type": "object",
+      "required": [
+        "node_id",
+        "kind",
+        "depends_on",
+        "on_failure",
+        "permissions",
+        "success_conditions"
+      ],
+      "properties": {
+        "node_id": { "$ref": "#/$defs/nodeId" },
+        "kind": { "enum": ["agent_task", "tool_call", "verification", "human_approval"] },
+        "depends_on": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/dependency" },
+          "uniqueItems": true
+        },
+        "condition": { "$ref": "#/$defs/condition" },
+        "retry": { "$ref": "#/$defs/retryPolicy" },
+        "on_failure": { "enum": ["stop", "continue"] },
+        "permissions": { "$ref": "#/$defs/permissions" },
+        "success_conditions": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/successCondition" }
+        }
+      }
+    },
+    "node": {
+      "oneOf": [
+        {
+          "allOf": [
+            { "$ref": "#/$defs/nodeBase" },
+            {
+              "type": "object",
+              "required": ["goal"],
+              "properties": {
+                "kind": { "const": "agent_task" },
+                "goal": { "type": "string", "minLength": 1 },
+                "instructions": { "type": "string", "minLength": 1 }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            { "$ref": "#/$defs/nodeBase" },
+            {
+              "type": "object",
+              "required": ["tool"],
+              "properties": {
+                "kind": { "const": "tool_call" },
+                "tool": { "type": "string", "minLength": 1 },
+                "arguments": {
+                  "type": "object",
+                  "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            { "$ref": "#/$defs/nodeBase" },
+            {
+              "type": "object",
+              "required": ["verifier_id"],
+              "properties": {
+                "kind": { "const": "verification" },
+                "verifier_id": { "$ref": "#/$defs/verifierId" }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            { "$ref": "#/$defs/nodeBase" },
+            {
+              "type": "object",
+              "required": ["approval_id", "prompt"],
+              "properties": {
+                "kind": { "const": "human_approval" },
+                "approval_id": { "type": "string", "minLength": 1 },
+                "prompt": { "type": "string", "minLength": 1 }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "outputDefinition": {
+      "type": "object",
+      "required": ["from", "schema"],
+      "properties": {
+        "from": {
+          "type": "object",
+          "required": ["node_id"],
+          "properties": {
+            "node_id": { "$ref": "#/$defs/nodeId" },
+            "path": { "type": "string", "pattern": "^(|/(?:[^~/]|~[01])*)$" }
+          },
+          "additionalProperties": false
+        },
+        "schema": { "$ref": "#/$defs/jsonSchema" },
+        "description": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "verifier": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["verifier_id", "kind", "schema"],
+          "properties": {
+            "verifier_id": { "$ref": "#/$defs/verifierId" },
+            "kind": { "const": "json_schema" },
+            "schema": { "$ref": "#/$defs/jsonSchema" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["verifier_id", "kind", "assertion"],
+          "properties": {
+            "verifier_id": { "$ref": "#/$defs/verifierId" },
+            "kind": { "const": "assertion" },
+            "assertion": { "type": "string", "minLength": 1 }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["verifier_id", "kind", "prompt"],
+          "properties": {
+            "verifier_id": { "$ref": "#/$defs/verifierId" },
+            "kind": { "const": "human" },
+            "prompt": { "type": "string", "minLength": 1 }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

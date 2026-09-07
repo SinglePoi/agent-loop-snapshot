@@ -542,6 +542,13 @@ flowchart LR
 - 所有节点都能声明成功条件。
 - YAML 和 JSON 表达通过同一 schema 校验。
 
+**完成记录（2026-09-07）**
+
+- `@agent-loop-snapshot/schema` 新增 `workflow.schema.json`、Workflow IR TypeScript 类型与 `validateWorkflow()`；
+- IR 包含 input、四类节点、依赖结果、条件、重试、失败行为、输出、verifier 和权限/副作用元数据；
+- schema 要求每个节点至少定义一个 success condition，语义校验会检查节点、输出、输入/节点输出引用、verifier 引用和依赖环；
+- JSON 和 YAML 都在解析为对象后进入同一 schema 与语义校验器；固定测试覆盖分支、并行、汇合、重试和失败继续路径。
+
 #### ALS-402：实现 Trace Compiler
 
 **依赖**：ALS-401
@@ -559,6 +566,13 @@ flowchart LR
 - 被删除的失败步骤仍保留在编译报告中。
 - 编译相同固定 Trace 产生规范化后一致的 IR。
 
+**完成记录（2026-09-07）**
+
+- `@agent-loop-snapshot/replay` 新增 `compileTraceToWorkflow()`，从有效 `TraceSnapshot` 生成可编辑 Workflow IR、节点到事件的来源映射和编译报告；
+- 模型/工具调用按 correlation key 归并，父事件关系转为依赖边，重试失败保留在 `removedFailureSteps` 中而不重复成为工作流节点；
+- 报告包含输入 schema 候选与模型/工具环境常量，历史输入值、工具参数、模型输入输出、决策文本和审批均不会进入 IR 或报告；
+- 固定 Example Runtime Trace 验证了稳定输出、并行依赖、重试失败映射与敏感运行数据不泄漏。
+
 #### ALS-403：实现 Semantic Replay Runner
 
 **依赖**：ALS-402
@@ -575,6 +589,13 @@ flowchart LR
 - Agent 未满足输出 schema 时触发受限重试或失败。
 - 最终报告区分“过程相同”和“结果等价”。
 
+**完成记录（2026-09-07）**
+
+- `SemanticReplayRunner` 接受 Workflow IR、新输入和显式 Semantic Agent adapter；adapter 可采用与原 Trace 不同的内部工具序列；
+- 节点依赖、条件、失败策略与有界重试由 Runner 调度，output schema、条件和 JSON Schema/custom/human verifier 共同决定节点是否成功；
+- 每次 Agent 与自定义 verifier 调用均通过 Policy Engine 审计，使用节点与 adapter 中更严格的副作用级别；
+- 最终报告独立给出过程匹配与结果等价状态，并覆盖新输入、schema 失败重试和外部写入执行前拦截测试。
+
 #### ALS-404：实现跨 Runtime Adapter 和兼容性套件
 
 **依赖**：ALS-403
@@ -589,6 +610,13 @@ flowchart LR
 
 - 至少一个 Workflow 能由两个不同 adapter 执行。
 - 不支持的能力在运行前被检测，而不是执行到一半才失败。
+
+**完成记录（2026-09-07）**
+
+- Semantic Agent adapter 可声明四类 `semantic.node.*` 节点能力，`inspectSemanticAgentCompatibility()` 在执行前计算 required/unsupported 能力与兼容模式；
+- 新增无外部依赖的 `ScriptedSemanticRuntimeAdapter` 作为第二个确定性 Agent runtime，实现公开的 `SemanticAgentAdapter` 协议；
+- 同一固定 Workflow IR 已由参考 adapter 与 Scripted Runtime 执行并验证等价输出；
+- 受限 runtime 缺少 verification 能力时会在首次 Agent 调用前失败，并输出结构化 `AGENT_CAPABILITY_MISSING` 诊断。
 
 ### M5：稳定化与发布
 
@@ -605,6 +633,13 @@ flowchart LR
 - 迁移不会原地覆盖源快照。
 - 每个迁移步骤可重复执行并验证输出。
 - 未知 major 版本默认拒绝执行，但允许安全地查看元数据。
+
+**完成记录（2026-09-07）**
+
+- `@agent-loop-snapshot/schema` 新增 semver 兼容性检查、安全 metadata view、纯文档迁移和目录迁移 API；
+- 定义精确版本可执行、`0.0.0 → 0.1.0` 注册迁移、同 major 未注册版本 view-only、未知 major 永不执行/迁移的策略；
+- 目录迁移要求新输出目录，使用同盘临时目录验证后原子重命名，源快照和 artifact 不会被覆盖；
+- 新增 `legacy-v0.0.0` golden fixture，覆盖迁移合法性、幂等、源文件不变、输出存在保护和未知 major metadata view。
 
 #### ALS-502：性能、并发和故障注入
 

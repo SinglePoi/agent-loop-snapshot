@@ -5,19 +5,34 @@ import { fileURLToPath } from 'node:url';
 
 import { loadTraceSnapshot } from '@agent-loop-snapshot/trace';
 import { Recorder } from '@agent-loop-snapshot/recorder';
+import type { WorkflowDocument } from '@agent-loop-snapshot/schema';
 
 import {
   MockReplayRunner,
   RecorderReplayPolicyAuditSink,
   ReplayAdapterRegistry,
   ReplayPolicyEngine,
+  SemanticReplayRunner,
+  ScriptedSemanticRuntimeAdapter,
   VerifiedReplayRunner,
   compareVerifiedReplayValues,
+  compileTraceToWorkflow,
   createRecordedReplayAdapterSet,
   createReplayPolicyAction,
   createReplayCorrelationKey,
+  inspectSemanticAgentCompatibility,
   selectReplayResumePoint,
 } from './index.js';
+
+async function loadExampleTrace() {
+  const fixture = resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    '../../example-runtime/fixtures/example-run',
+  );
+  const trace = await loadTraceSnapshot(fixture);
+  assert.equal(trace.valid, true, JSON.stringify(trace.diagnostics));
+  return trace;
+}
 
 test('creates deterministic correlation keys and keeps retries on the same logical call', () => {
   const identity = { kind: 'tool' as const, target: 'read/file name', ordinal: 2 };
@@ -56,12 +71,7 @@ test('returns structured diagnostics for unavailable and incapable adapters', ()
 });
 
 test('switches to recorded adapters built from the example snapshot', async () => {
-  const fixture = resolve(
-    dirname(fileURLToPath(import.meta.url)),
-    '../../example-runtime/fixtures/example-run',
-  );
-  const trace = await loadTraceSnapshot(fixture);
-  assert.equal(trace.valid, true, JSON.stringify(trace.diagnostics));
+  const trace = await loadExampleTrace();
 
   const recorded = createRecordedReplayAdapterSet(trace);
   assert.deepEqual(recorded.diagnostics, []);
@@ -117,6 +127,249 @@ test('switches to recorded adapters built from the example snapshot', async () =
       })
     ).status,
     'failed',
+  );
+});
+
+test('compiles the example Trace into a stable editable Workflow IR with provenance', async () => {
+  const trace = await loadExampleTrace();
+  const first = compileTraceToWorkflow(trace);
+  const second = compileTraceToWorkflow(trace);
+
+  assert.deepEqual(first.diagnostics, []);
+  assert.deepEqual(first, second);
+  assert.ok(first.workflow);
+  assert.deepEqual(
+    first.workflow.nodes.map((node) => ({
+      id: node.node_id,
+      kind: node.kind,
+      dependsOn: node.depends_on,
+    })),
+    [
+      { id: 'node_model_1', kind: 'agent_task', dependsOn: [] },
+      {
+        id: 'node_tool_2',
+        kind: 'tool_call',
+        dependsOn: [{ node_id: 'node_model_1', on: 'success' }],
+      },
+      {
+        id: 'node_tool_3',
+        kind: 'tool_call',
+        dependsOn: [{ node_id: 'node_model_1', on: 'success' }],
+      },
+    ],
+  );
+  assert.deepEqual(first.report.parameterCandidates, [
+    {
+      name: 'goal',
+      schema: { type: 'string' },
+      sourceEventIds: ['evt_00000000-0000-4000-8000-000000000101'],
+      reason: 'run_input',
+    },
+  ]);
+  assert.deepEqual(first.report.removedFailureSteps, [
+    {
+      kind: 'tool',
+      correlationKey: 'tool:read_goal_metadata:0:fixture',
+      eventIds: ['evt_00000000-0000-4000-8000-000000000108'],
+      errorCodes: ['TEMPORARY_TOOL_FAILURE'],
+      reason: 'retry_merged',
+    },
+  ]);
+  assert.deepEqual(first.sourceMap[1], {
+    nodeId: 'node_tool_2',
+    eventIds: [
+      'evt_00000000-0000-4000-8000-000000000106',
+      'evt_00000000-0000-4000-8000-000000000108',
+      'evt_00000000-0000-4000-8000-000000000110',
+      'evt_00000000-0000-4000-8000-000000000111',
+    ],
+  });
+});
+
+test('does not copy source values, arguments, decisions, or approvals into compiled Workflow IR', async () => {
+  const trace = await loadExampleTrace();
+  const result = compileTraceToWorkflow(trace);
+  const compiled = JSON.stringify(result);
+
+  assert.equal(result.diagnostics.length, 0);
+  assert.equal(compiled.includes('summarize fixture'), false);
+  assert.equal(compiled.includes('example answer'), false);
+  assert.equal(compiled.includes('all read-only tools completed'), false);
+});
+
+function semanticWorkflow(): WorkflowDocument {
+  return {
+    schema_version: '0.1.0',
+    workflow_type: 'agent-workflow',
+    workflow_id: 'wf_semantic_fixture',
+    name: 'Semantic fixture',
+    inputs: { topic: { schema: { type: 'string' }, required: true } },
+    verifiers: [
+      {
+        verifier_id: 'verifier_answer',
+        kind: 'json_schema',
+        schema: { type: 'string', minLength: 3 },
+      },
+    ],
+    nodes: [
+      {
+        node_id: 'node_draft',
+        kind: 'agent_task',
+        goal: 'Draft an answer.',
+        depends_on: [],
+        retry: { max_attempts: 2 },
+        on_failure: 'stop',
+        permissions: { side_effect: 'read_only' },
+        success_conditions: [{ kind: 'output_schema', schema: { type: 'string', minLength: 3 } }],
+      },
+      {
+        node_id: 'node_verify',
+        kind: 'verification',
+        verifier_id: 'verifier_answer',
+        depends_on: [{ node_id: 'node_draft', on: 'success' }],
+        on_failure: 'stop',
+        permissions: { side_effect: 'read_only' },
+        success_conditions: [{ kind: 'verifier', verifier_id: 'verifier_answer' }],
+      },
+    ],
+    outputs: { answer: { from: { node_id: 'node_verify' }, schema: { type: 'string' } } },
+  };
+}
+
+test('semantic replay accepts new inputs, retries invalid outputs, and reports process/result separately', async () => {
+  const calls: Array<{ nodeId: string; attempt: number; topic: string }> = [];
+  const result = await new SemanticReplayRunner({
+    workflow: semanticWorkflow(),
+    recorder: new Recorder(),
+    agent: {
+      descriptor: {
+        name: 'semantic-test-agent',
+        version: 'test',
+        capabilities: ['agent.execute'],
+        sideEffect: 'read_only',
+      },
+      async execute(invocation) {
+        calls.push({
+          nodeId: invocation.node.node_id,
+          attempt: invocation.attempt,
+          topic: invocation.inputs.topic as string,
+        });
+        if (invocation.node.node_id === 'node_draft' && invocation.attempt === 1) {
+          return { status: 'completed', output: '' };
+        }
+        return { status: 'completed', output: `answer for ${invocation.inputs.topic as string}` };
+      },
+    },
+  }).run({ inputs: { topic: 'new request' } });
+
+  assert.equal(result.run.status, 'completed');
+  assert.deepEqual(result.outputs, { answer: 'answer for new request' });
+  assert.deepEqual(result.report, { process: 'diverged', result: 'equivalent' });
+  assert.deepEqual(
+    calls.map(({ nodeId, attempt }) => ({ nodeId, attempt })),
+    [
+      { nodeId: 'node_draft', attempt: 1 },
+      { nodeId: 'node_draft', attempt: 2 },
+      { nodeId: 'node_verify', attempt: 1 },
+    ],
+  );
+  assert.equal(result.nodeResults[0]?.status, 'completed');
+  assert.equal(result.nodeResults[0]?.attempts, 2);
+  assert.deepEqual(result.diagnostics, []);
+});
+
+test('semantic replay blocks an external-write node before the Agent can execute it', async () => {
+  const workflow = semanticWorkflow();
+  workflow.nodes[0] = {
+    ...workflow.nodes[0]!,
+    kind: 'human_approval',
+    approval_id: 'publish',
+    prompt: 'Publish?',
+    permissions: { side_effect: 'external_write', requires_approval: true },
+  };
+  let invocations = 0;
+  const result = await new SemanticReplayRunner({
+    workflow,
+    recorder: new Recorder(),
+    agent: {
+      descriptor: {
+        name: 'semantic-test-agent',
+        version: 'test',
+        capabilities: ['agent.execute'],
+        sideEffect: 'external_write',
+      },
+      async execute() {
+        invocations += 1;
+        return { status: 'completed', output: 'should not run' };
+      },
+    },
+  }).run({ inputs: { topic: 'new request' } });
+
+  assert.equal(invocations, 0);
+  assert.equal(result.run.status, 'failed');
+  assert.equal(result.report.result, 'not_equivalent');
+  assert.equal(result.nodeResults[0]?.status, 'failed');
+});
+
+test('runs one Workflow IR on two Semantic runtimes and reports capability degradation before execution', async () => {
+  const workflow = semanticWorkflow();
+  const referenceAgent = {
+    descriptor: {
+      name: 'reference-semantic-runtime',
+      version: 'test',
+      capabilities: [
+        'agent.execute',
+        'semantic.node.agent_task',
+        'semantic.node.verification',
+      ] as const,
+      sideEffect: 'read_only' as const,
+    },
+    async execute() {
+      return { status: 'completed' as const, output: 'portable answer' };
+    },
+  };
+  const scriptedAgent = new ScriptedSemanticRuntimeAdapter({
+    execute: async () => ({ status: 'completed', output: 'portable answer' }),
+  });
+
+  const reference = await new SemanticReplayRunner({
+    workflow,
+    recorder: new Recorder(),
+    agent: referenceAgent,
+  }).run({ inputs: { topic: 'portable request' } });
+  const scripted = await new SemanticReplayRunner({
+    workflow,
+    recorder: new Recorder(),
+    agent: scriptedAgent,
+  }).run({ inputs: { topic: 'portable request' } });
+  assert.deepEqual(reference.outputs, { answer: 'portable answer' });
+  assert.deepEqual(scripted.outputs, reference.outputs);
+  assert.equal(reference.run.status, 'completed');
+  assert.equal(scripted.run.status, 'completed');
+
+  let executions = 0;
+  const restrictedAgent = new ScriptedSemanticRuntimeAdapter({
+    supportedNodes: ['semantic.node.agent_task'],
+    execute: async () => {
+      executions += 1;
+      return { status: 'completed', output: 'should not run' };
+    },
+  });
+  assert.deepEqual(inspectSemanticAgentCompatibility(workflow, restrictedAgent), {
+    compatible: false,
+    required: ['semantic.node.agent_task', 'semantic.node.verification'],
+    unsupported: ['semantic.node.verification'],
+    capabilityMode: 'explicit',
+  });
+  const degraded = await new SemanticReplayRunner({
+    workflow,
+    recorder: new Recorder(),
+    agent: restrictedAgent,
+  }).run({ inputs: { topic: 'portable request' } });
+  assert.equal(executions, 0);
+  assert.equal(degraded.run.status, 'failed');
+  assert.ok(
+    degraded.diagnostics.some((diagnostic) => diagnostic.code === 'AGENT_CAPABILITY_MISSING'),
   );
 });
 

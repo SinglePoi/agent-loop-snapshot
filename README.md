@@ -2,7 +2,7 @@
 
 Agent Loop Snapshot 是一个面向 Agent Runtime 的运行记录、可视化与回放工具。它把一次 Agent Loop 中的模型调用、工具调用、状态变化、检查点和产物保存为可移植快照，并可进一步生成流程图或编译为可执行工作流，让另一个 Agent 在明确的权限和验证规则下复现任务。
 
-> 当前状态：基础协议、Recorder、耐崩溃写入、Artifact Store、Checkpoint Store、Trace Loader、Graph Projector 和 CLI 已实现；Replay Adapter、Policy Engine、Mock Replay、Checkpoint Resume 与 Verified Replay 已就绪，工作流与语义回放仍在开发中。
+> 当前状态：基础协议、Recorder、耐崩溃写入、Artifact Store、Checkpoint Store、Trace Loader、Graph Projector 和 CLI 已实现；Replay Adapter、Policy Engine、Mock Replay、Checkpoint Resume、Verified Replay、Workflow IR v0.1、Trace Compiler、Semantic Replay 与跨 Runtime 兼容性套件已就绪，后续进入稳定化与发布阶段。
 
 ## 项目目标
 
@@ -27,6 +27,16 @@ Agent Loop Snapshot 是一个面向 Agent Runtime 的运行记录、可视化与
 ## Snapshot Schema v0.1
 
 `packages/schema/schemas/` 提供 JSON Schema 2020-12 定义，覆盖 `manifest.json`、`events.jsonl` 中的事件包络、checkpoint 和 artifact reference。所有持久化对象都必须携带 `schema_version: "0.1.0"`。
+
+Workflow IR 使用同一版本线，但它是独立的 `agent-workflow` 文档，而非 Run Snapshot 的一部分。`workflow.schema.json` 与 `validateWorkflow()` 定义了输入、节点、依赖、条件、重试、输出、验证器和权限元数据；JSON 与 YAML 都应先解析为普通对象，再由同一校验器验证。完整格式见 [Workflow IR v0.1](docs/workflow-ir-v0.1.md)。
+
+`@agent-loop-snapshot/replay` 的 `compileTraceToWorkflow(trace)` 会从有效 Trace 提炼可编辑的 Workflow IR、每个节点的 source event 映射，以及候选参数、环境常量和被重试归并的失败步骤报告。它不会复制历史输入值、工具参数、审批记录或决策文本；这些内容需要在人工确认阶段重新提供。
+
+`SemanticReplayRunner` 将有效 Workflow IR、新输入与节点上下文交给显式配置的 Semantic Agent adapter；它允许 adapter 使用与原 Trace 不同的内部工具序列。每次 Agent 或自定义 verifier 调用均经过 Policy Engine，节点的 output schema 或 verifier 不通过时仅在节点 `retry.max_attempts` 范围内重试。结果同时报告 IR 过程是否按原节点顺序一次完成，以及新运行是否满足所有成功条件和输出 schema。
+
+`@agent-loop-snapshot/schema` 的 `inspectSnapshotCompatibility()`、`migrateSnapshot()` 与 `migrateSnapshotDirectory()` 提供版本兼容性检查和显式迁移。当前支持 `0.0.0` 到 `0.1.0`；迁移始终生成新文档或新目录，未知 major 版本只能安全查看元数据，不能执行或自动迁移。
+
+Semantic Agent adapter 可选择声明 `semantic.node.*` 能力；`inspectSemanticAgentCompatibility()` 会在运行前比较 Workflow IR 所需的节点能力。仓库提供 `ScriptedSemanticRuntimeAdapter` 作为独立的确定性第二 runtime，用于兼容性和降级测试；未声明细粒度能力的旧 adapter 保持“支持全部节点”的兼容模式。
 
 事件的 `sequence` 只表示单次 Run 的写入顺序，`parent_ids` 表示因果关系，因此可以表达并行、重试和多父节点汇合。未知字段可被读取器忽略；未知事件类型作为 opaque event 保留，但不能被回放执行。大 payload 可以由内容寻址的 artifact reference 替代。
 
@@ -178,6 +188,8 @@ pnpm run alsnap -- workflow run ./runs/run-123/workflow.yaml
 
 - [实施规划与任务清单](docs/implementation-plan.md)
 - [开发交接记录](docs/handoff.md)
+- [Workflow IR v0.1](docs/workflow-ir-v0.1.md)
+- [Schema compatibility and migration](docs/schema-compatibility.md)
 - [ADR-0001：使用 TypeScript 实现首个版本](docs/adr/0001-use-typescript.md)
 - [ADR-0002：首个 Agent Runtime 与快照存储边界](docs/adr/0002-runtime-and-storage.md)
 - [ADR-0003：事件顺序、身份、时钟与错误模型](docs/adr/0003-event-ordering-and-identity.md)
