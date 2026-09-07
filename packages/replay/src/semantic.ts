@@ -406,9 +406,12 @@ export class SemanticReplayRunner {
           nodeOutputs[node.node_id] = result.output;
         }
         if (result.status === 'failed') {
+          const policyBlocked = result.messages.some((message) =>
+            message.startsWith('Policy blocked attempt '),
+          );
           diagnostics.push({
             severity: 'error',
-            code: 'SUCCESS_CONDITION_FAILED',
+            code: policyBlocked ? 'POLICY_BLOCKED' : 'SUCCESS_CONDITION_FAILED',
             nodeId: node.node_id,
             message: result.messages.at(-1) ?? `Workflow node "${node.node_id}" failed.`,
           });
@@ -527,7 +530,10 @@ export class SemanticReplayRunner {
           }),
         (() => {
           const approval = options.approvalForAction?.(action);
-          return approval === undefined ? {} : { approval };
+          return {
+            ...(node.permissions.requires_approval === true ? { requiresApproval: true } : {}),
+            ...(approval === undefined ? {} : { approval }),
+          };
         })(),
       );
       if (!execution.executed || execution.value === undefined) {

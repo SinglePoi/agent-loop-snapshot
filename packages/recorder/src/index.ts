@@ -46,6 +46,13 @@ export interface RecorderInterceptor {
     | void
     | Promise<Readonly<EventEnvelope<string, unknown>> | void>;
   afterAppend?(event: Readonly<EventEnvelope<string, unknown>>): void | Promise<void>;
+  /**
+   * Runs before a checkpoint and its checkpoint.created event are committed.
+   * Interceptors may transform the state and state hash, but not checkpoint identity.
+   */
+  beforeCheckpoint?(
+    checkpoint: Readonly<Checkpoint>,
+  ): Readonly<Checkpoint> | void | Promise<Readonly<Checkpoint> | void>;
   afterCheckpoint?(checkpoint: Readonly<Checkpoint>): void | Promise<void>;
 }
 
@@ -366,7 +373,7 @@ export class Recorder {
       }
 
       const checkpointId = this.ids.createCheckpointId();
-      const checkpointEvent = this.buildEvent(
+      let checkpointEvent = this.buildEvent(
         record,
         context,
         {
@@ -393,13 +400,29 @@ export class Recorder {
         state: input.state,
       };
 
+      let transformedCheckpoint = checkpoint;
+      for (const interceptor of this.interceptors) {
+        const intercepted = await interceptor.beforeCheckpoint?.(transformedCheckpoint);
+        if (intercepted !== undefined) {
+          this.assertCheckpointIdentityPreserved(transformedCheckpoint, intercepted);
+          transformedCheckpoint = intercepted as Checkpoint;
+        }
+      }
+      checkpointEvent = {
+        ...checkpointEvent,
+        payload: {
+          ...checkpointEvent.payload,
+          state_hash: transformedCheckpoint.state_hash,
+        },
+      };
+
       await this.commitEvent(record, checkpointEvent, () => {
-        record.checkpoints.push(checkpoint);
+        record.checkpoints.push(transformedCheckpoint);
       });
 
       for (const interceptor of this.interceptors) {
         try {
-          await interceptor.afterCheckpoint?.(checkpoint);
+          await interceptor.afterCheckpoint?.(transformedCheckpoint);
         } catch (error) {
           throw new RecorderError(
             'INTERCEPTOR_FAILED_AFTER_CHECKPOINT',
@@ -409,7 +432,7 @@ export class Recorder {
           );
         }
       }
-      return checkpoint;
+      return transformedCheckpoint;
     });
   }
 
@@ -581,6 +604,25 @@ export class Recorder {
       throw new RecorderError(
         'INTERCEPTOR_IDENTITY_MUTATION',
         'An interceptor may transform payload or security fields but not event identity or ordering fields.',
+      );
+    }
+  }
+
+  private assertCheckpointIdentityPreserved(
+    original: Readonly<Checkpoint>,
+    intercepted: Readonly<Checkpoint>,
+  ): void {
+    if (
+      intercepted.schema_version !== original.schema_version ||
+      intercepted.checkpoint_id !== original.checkpoint_id ||
+      intercepted.run_id !== original.run_id ||
+      intercepted.created_at !== original.created_at ||
+      intercepted.last_event_id !== original.last_event_id ||
+      intercepted.sequence !== original.sequence
+    ) {
+      throw new RecorderError(
+        'INTERCEPTOR_IDENTITY_MUTATION',
+        'A checkpoint interceptor may transform state or state_hash but not checkpoint identity.',
       );
     }
   }

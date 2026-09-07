@@ -1,12 +1,16 @@
 import { randomUUID } from 'node:crypto';
 
+import { snapshotSchemaVersion } from '@agent-loop-snapshot/schema/protocol';
 import type {
+  ArtifactReference,
+  Checkpoint,
   EventEnvelope,
   JsonObject,
   JsonValue,
   RedactionEntry,
 } from '@agent-loop-snapshot/schema';
 
+import { hashState } from './checkpoints.js';
 import type { RecorderInterceptor } from './index.js';
 
 export type RedactionStrategy = RedactionEntry['strategy'];
@@ -27,7 +31,7 @@ export interface RegexRedactionRule {
 export interface RedactionContext {
   path: string;
   category: string;
-  source: 'event' | 'artifact';
+  source: 'event' | 'artifact' | 'checkpoint';
   eventType?: string;
 }
 
@@ -72,7 +76,7 @@ export class RedactionError extends Error {
 
 interface RedactionExecutionOptions {
   pathPrefix: string;
-  source: 'event' | 'artifact';
+  source: RedactionContext['source'];
   eventType?: string;
 }
 
@@ -90,6 +94,16 @@ interface NormalizedValue {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isArtifactReference(value: unknown): value is ArtifactReference {
+  return (
+    isRecord(value) &&
+    value.schema_version === snapshotSchemaVersion &&
+    typeof value.digest === 'string' &&
+    typeof value.media_type === 'string' &&
+    typeof value.byte_length === 'number'
+  );
 }
 
 function normalizeValue(value: unknown, seen = new WeakSet<object>()): NormalizedValue {
@@ -195,6 +209,13 @@ function placeholder(category: string, strategy: 'mask' | 'reference'): string {
   return `[REDACTED:${safeCategory(category)}:ref_${randomUUID()}]`;
 }
 
+function isRedactionPlaceholder(value: JsonValue): value is string {
+  return (
+    typeof value === 'string' &&
+    /^\[REDACTED:[A-Za-z0-9_.-]+(?::ref_[0-9a-f-]{36})?\]$/u.test(value)
+  );
+}
+
 function addEntry(entries: RedactionEntry[], entry: RedactionEntry): void {
   if (
     !entries.some(
@@ -212,12 +233,16 @@ function decisionForStrategy(
   value: JsonValue,
   strategy: FieldRedactionStrategy,
   category: string,
+  pipeline: RedactionPipeline,
 ): RedactionDecision {
   if (strategy === 'remove') {
     return { action: 'remove' };
   }
   if (strategy === 'mask' || strategy === 'reference') {
-    return { action: 'replace', value: placeholder(category, strategy) };
+    if (isRedactionPlaceholder(value)) {
+      return { action: 'keep' };
+    }
+    return { action: 'replace', value: pipeline.placeholderFor(value, category, strategy) };
   }
   return { action: 'replace', value };
 }
@@ -251,6 +276,7 @@ async function applyPathRule(
   value: JsonValue,
   segments: readonly string[],
   rule: FieldRedactionRule | CustomRedactionRule,
+  pipeline: RedactionPipeline,
   options: RedactionExecutionOptions,
   actualPath: string,
 ): Promise<ApplyResult> {
@@ -263,7 +289,7 @@ async function applyPathRule(
     };
     let decision: RedactionDecision;
     if ('strategy' in rule) {
-      decision = decisionForStrategy(value, rule.strategy, rule.category);
+      decision = decisionForStrategy(value, rule.strategy, rule.category, pipeline);
     } else {
       try {
         decision = (await rule.redact(value, context)) ?? { action: 'keep' };
@@ -292,6 +318,7 @@ async function applyPathRule(
         value[index]!,
         segments.slice(1),
         rule,
+        pipeline,
         options,
         `${actualPath}/${index}`,
       );
@@ -325,6 +352,7 @@ async function applyPathRule(
       value[key]!,
       segments.slice(1),
       rule,
+      pipeline,
       options,
       `${actualPath}/${key.replaceAll('~', '~0').replaceAll('/', '~1')}`,
     );
@@ -418,26 +446,32 @@ async function applyGlobalCustomRule(
   return { ...applied, changed, entries };
 }
 
-function regexDecision(strategy: Exclude<RedactionStrategy, 'custom'>, category: string): string {
+function regexDecision(
+  value: string,
+  strategy: Exclude<RedactionStrategy, 'custom'>,
+  category: string,
+  pipeline: RedactionPipeline,
+): string {
   if (strategy === 'remove') {
     return '';
   }
-  return placeholder(category, strategy);
+  return pipeline.placeholderFor(value, category, strategy);
 }
 
 function redactString(
   value: string,
   rules: readonly RegexRedactionRule[],
   path: string,
+  pipeline: RedactionPipeline,
 ): { value: string; entries: RedactionEntry[] } {
   let current = value;
   const entries: RedactionEntry[] = [];
   for (const rule of rules) {
     rule.pattern.lastIndex = 0;
     let changed = false;
-    current = current.replace(rule.pattern, () => {
+    current = current.replace(rule.pattern, (match) => {
       changed = true;
-      return regexDecision(rule.strategy, rule.category);
+      return regexDecision(match, rule.strategy, rule.category, pipeline);
     });
     rule.pattern.lastIndex = 0;
     if (changed) {
@@ -455,9 +489,10 @@ function applyRegexRules(
   value: JsonValue,
   rules: readonly RegexRedactionRule[],
   actualPath: string,
+  pipeline: RedactionPipeline,
 ): ApplyResult {
   if (typeof value === 'string') {
-    const result = redactString(value, rules, actualPath);
+    const result = redactString(value, rules, actualPath, pipeline);
     return {
       value: result.value,
       removed: false,
@@ -470,7 +505,7 @@ function applyRegexRules(
     const entries: RedactionEntry[] = [];
     let changed = false;
     value.forEach((child, index) => {
-      const result = applyRegexRules(child, rules, `${actualPath}/${index}`);
+      const result = applyRegexRules(child, rules, `${actualPath}/${index}`, pipeline);
       if (result.changed) {
         value[index] = result.value;
         changed = true;
@@ -491,6 +526,7 @@ function applyRegexRules(
       value[key]!,
       rules,
       `${actualPath}/${key.replaceAll('~', '~0').replaceAll('/', '~1')}`,
+      pipeline,
     );
     if (result.changed) {
       value[key] = result.value;
@@ -515,6 +551,7 @@ async function redactJsonValue(
       value,
       pathSegments(rule.path),
       rule,
+      pipeline,
       options,
       options.pathPrefix,
     );
@@ -526,12 +563,19 @@ async function redactJsonValue(
     const result =
       rule.path === undefined
         ? await applyGlobalCustomRule(value, rule, options, options.pathPrefix)
-        : await applyPathRule(value, pathSegments(rule.path), rule, options, options.pathPrefix);
+        : await applyPathRule(
+            value,
+            pathSegments(rule.path),
+            rule,
+            pipeline,
+            options,
+            options.pathPrefix,
+          );
     value = result.removed ? null : result.value;
     result.entries.forEach((entry) => addEntry(redactions, entry));
   }
 
-  const regex = applyRegexRules(value, pipeline.regexRules, options.pathPrefix);
+  const regex = applyRegexRules(value, pipeline.regexRules, options.pathPrefix, pipeline);
   value = regex.value;
   regex.entries.forEach((entry) => addEntry(redactions, entry));
 
@@ -581,6 +625,7 @@ export class RedactionPipeline {
   readonly fieldRules: readonly FieldRedactionRule[];
   readonly regexRules: readonly RegexRedactionRule[];
   readonly customRedactors: readonly CustomRedactionRule[];
+  private readonly referencePlaceholders = new Map<string, string>();
 
   constructor(options: RedactionPipelineOptions = {}) {
     options.fieldRules?.forEach((rule) => pathSegments(rule.path));
@@ -592,6 +637,20 @@ export class RedactionPipeline {
     this.fieldRules = options.fieldRules ?? [];
     this.regexRules = options.regexRules ?? [];
     this.customRedactors = options.customRedactors ?? [];
+  }
+
+  placeholderFor(value: JsonValue, category: string, strategy: 'mask' | 'reference'): string {
+    if (strategy === 'mask') {
+      return placeholder(category, strategy);
+    }
+    const key = `${safeCategory(category)}\u0000${JSON.stringify(value)}`;
+    const existing = this.referencePlaceholders.get(key);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const reference = placeholder(category, strategy);
+    this.referencePlaceholders.set(key, reference);
+    return reference;
   }
 
   async redactEvent(
@@ -616,9 +675,34 @@ export class RedactionPipeline {
     };
   }
 
+  async redactCheckpoint(checkpoint: Readonly<Checkpoint>): Promise<Checkpoint> {
+    if (isArtifactReference(checkpoint.state)) {
+      return { ...checkpoint };
+    }
+
+    const result = await redactJsonValue(checkpoint.state, this, {
+      pathPrefix: '/checkpoint/state',
+      source: 'checkpoint',
+    });
+    if (!isRecord(result.value)) {
+      throw new RedactionError(
+        'UNSUPPORTED_VALUE',
+        'Checkpoint redaction must preserve an object state.',
+      );
+    }
+
+    const state = result.value as JsonObject;
+    return {
+      ...checkpoint,
+      state,
+      state_hash: hashState(state),
+    };
+  }
+
   asInterceptor(): RecorderInterceptor {
     return {
       beforeAppend: (event) => this.redactEvent(event),
+      beforeCheckpoint: (checkpoint) => this.redactCheckpoint(checkpoint),
     };
   }
 
