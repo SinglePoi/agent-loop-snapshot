@@ -12,6 +12,13 @@ export type FlushMode = 'event' | 'batch' | 'manual';
 export interface JsonlWriterOptions {
   flushMode?: FlushMode;
   batchSize?: number;
+  faultInjector?: JsonlWriterFaultInjector;
+}
+
+/** Explicit test hook for exercising storage-failure recovery paths. */
+export interface JsonlWriterFaultInjector {
+  beforeWrite?(event: Readonly<EventEnvelope<string, unknown>>): void | Promise<void>;
+  beforeSync?(): void | Promise<void>;
 }
 
 export interface JsonlDiagnostic {
@@ -40,7 +47,14 @@ export interface SnapshotInspection {
 
 export class SnapshotWriterError extends Error {
   constructor(
-    readonly code: string,
+    readonly code:
+      | 'EVENT_WRITE_FAILED'
+      | 'EVENT_SYNC_FAILED'
+      | 'MANIFEST_COMMIT_FAILED'
+      | 'MANIFEST_NOT_TERMINAL'
+      | 'SEQUENCE_NOT_INCREASING'
+      | 'RUN_ID_MISMATCH'
+      | 'WRITER_CLOSED',
     message: string,
   ) {
     super(message);
@@ -113,6 +127,7 @@ export class JsonlEventWriter {
   private readonly filePath: string;
   private readonly flushMode: FlushMode;
   private readonly batchSize: number;
+  private readonly faultInjector: JsonlWriterFaultInjector | undefined;
   private readonly fileHandle: Awaited<ReturnType<typeof open>>;
   private queue: Promise<void> = Promise.resolve();
   private pendingWrites = 0;
@@ -132,6 +147,7 @@ export class JsonlEventWriter {
     this.fileHandle = fileHandle;
     this.flushMode = options.flushMode ?? 'event';
     this.batchSize = Math.max(1, options.batchSize ?? 10);
+    this.faultInjector = options.faultInjector;
     this.needsSeparator = !scan.endsWithNewline && scan.hasContent;
     this.initialDiagnostics = scan.diagnostics;
 
@@ -186,11 +202,19 @@ export class JsonlEventWriter {
       }
 
       const serialized = `${JSON.stringify(event)}\n`;
-      if (this.needsSeparator) {
-        await this.fileHandle.write('\n');
-        this.needsSeparator = false;
+      try {
+        await this.faultInjector?.beforeWrite?.(event);
+        if (this.needsSeparator) {
+          await this.fileHandle.write('\n');
+          this.needsSeparator = false;
+        }
+        await this.fileHandle.write(serialized);
+      } catch (error) {
+        throw new SnapshotWriterError(
+          'EVENT_WRITE_FAILED',
+          error instanceof Error ? error.message : 'Could not write JSONL event.',
+        );
       }
-      await this.fileHandle.write(serialized);
       this.lastSequence = event.sequence;
       this.pendingWrites += 1;
 
@@ -233,8 +257,16 @@ export class JsonlEventWriter {
   }
 
   private async syncInternal(): Promise<void> {
-    await this.fileHandle.sync();
-    this.pendingWrites = 0;
+    try {
+      await this.faultInjector?.beforeSync?.();
+      await this.fileHandle.sync();
+      this.pendingWrites = 0;
+    } catch (error) {
+      throw new SnapshotWriterError(
+        'EVENT_SYNC_FAILED',
+        error instanceof Error ? error.message : 'Could not sync JSONL events.',
+      );
+    }
   }
 }
 

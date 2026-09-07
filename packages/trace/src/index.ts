@@ -1,5 +1,5 @@
 import { createReadStream } from 'node:fs';
-import { readFile, readdir, stat } from 'node:fs/promises';
+import { lstat, readFile, readdir, stat } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 
 import {
@@ -17,6 +17,18 @@ export interface TraceLoader {
 }
 
 export const tracePackageName: TraceLoader['packageName'] = '@agent-loop-snapshot/trace';
+
+export const defaultTraceLoadLimits = {
+  maxEventFileBytes: 64 * 1024 * 1024,
+  maxArtifactBytes: 64 * 1024 * 1024,
+} as const;
+
+export interface TraceLoadOptions {
+  /** Maximum events.jsonl size accepted from an untrusted snapshot. */
+  maxEventFileBytes?: number;
+  /** Maximum artifact size exposed through readArtifact(). */
+  maxArtifactBytes?: number;
+}
 
 export type TraceDiagnosticSeverity = 'error' | 'warning';
 export type TraceDiagnosticSource =
@@ -261,11 +273,34 @@ function addJsonlDiagnostic(
 async function readJsonlFile(
   filePath: string,
   diagnostics: TraceDiagnostic[],
+  maxBytes: number,
 ): Promise<JsonlReadResult> {
   const values: unknown[] = [];
 
   try {
-    await stat(filePath);
+    const fileStats = await lstat(filePath);
+    if (!fileStats.isFile()) {
+      addDiagnostic(diagnostics, {
+        severity: 'error',
+        code: 'UNTRUSTED_EVENTS_FILE',
+        path: '/events',
+        message: 'events.jsonl must be a regular file inside the snapshot directory.',
+        source: 'events',
+        file: 'events.jsonl',
+      });
+      return { values };
+    }
+    if (fileStats.size > maxBytes) {
+      addDiagnostic(diagnostics, {
+        severity: 'error',
+        code: 'EVENT_FILE_TOO_LARGE',
+        path: '/events',
+        message: `events.jsonl is ${String(fileStats.size)} bytes, exceeding the ${String(maxBytes)} byte limit.`,
+        source: 'events',
+        file: 'events.jsonl',
+      });
+      return { values };
+    }
   } catch (error) {
     addDiagnostic(diagnostics, {
       severity: 'error',
@@ -503,6 +538,7 @@ async function loadArtifactMetadata(
   directory: string,
   referenceMap: Map<string, Array<{ path: string; reference: ArtifactReference }>>,
   diagnostics: TraceDiagnostic[],
+  maxArtifactBytes: number,
 ): Promise<Map<string, ArtifactMetadata>> {
   const artifactDirectory = join(directory, 'artifacts');
   const digests = new Set(referenceMap.keys());
@@ -522,10 +558,29 @@ async function loadArtifactMetadata(
     let exists = false;
     let actualByteLength: number | undefined;
     try {
-      const fileStats = await stat(artifactPath);
+      const fileStats = await lstat(artifactPath);
       exists = fileStats.isFile();
       if (exists) {
         actualByteLength = fileStats.size;
+        if (actualByteLength > maxArtifactBytes) {
+          addDiagnostic(diagnostics, {
+            severity: 'error',
+            code: 'ARTIFACT_TOO_LARGE',
+            path: `/artifacts/${digest}`,
+            message: `Artifact "${digest}" is ${String(actualByteLength)} bytes, exceeding the ${String(maxArtifactBytes)} byte limit.`,
+            source: 'artifacts',
+            file: artifactPath,
+          });
+        }
+      } else {
+        addDiagnostic(diagnostics, {
+          severity: 'error',
+          code: 'UNTRUSTED_ARTIFACT_ENTRY',
+          path: `/artifacts/${digest}`,
+          message: 'Artifacts must be regular files inside the snapshot artifact directory.',
+          source: 'artifacts',
+          file: artifactPath,
+        });
       }
     } catch {
       // The missing-artifact diagnostic below is emitted for referenced artifacts.
@@ -636,11 +691,36 @@ function createQueryModel(
   };
 }
 
-export async function loadTraceSnapshot(directory: string): Promise<TraceSnapshot> {
+function limit(value: number | undefined, fallback: number, name: string): number {
+  const resolved = value ?? fallback;
+  if (!Number.isSafeInteger(resolved) || resolved < 1) {
+    throw new RangeError(`${name} must be a positive safe integer.`);
+  }
+  return resolved;
+}
+
+export async function loadTraceSnapshot(
+  directory: string,
+  options: TraceLoadOptions = {},
+): Promise<TraceSnapshot> {
   const root = resolve(directory);
+  const maxEventFileBytes = limit(
+    options.maxEventFileBytes,
+    defaultTraceLoadLimits.maxEventFileBytes,
+    'maxEventFileBytes',
+  );
+  const maxArtifactBytes = limit(
+    options.maxArtifactBytes,
+    defaultTraceLoadLimits.maxArtifactBytes,
+    'maxArtifactBytes',
+  );
   const diagnostics: TraceDiagnostic[] = [];
   const manifestResult = await readManifest(root, diagnostics);
-  const eventsResult = await readJsonlFile(join(root, 'events.jsonl'), diagnostics);
+  const eventsResult = await readJsonlFile(
+    join(root, 'events.jsonl'),
+    diagnostics,
+    maxEventFileBytes,
+  );
   const checkpointValues = await readCheckpoints(join(root, 'checkpoints'), diagnostics);
   const manifest = isRecord(manifestResult.value)
     ? (manifestResult.value as unknown as SnapshotManifest)
@@ -666,7 +746,7 @@ export async function loadTraceSnapshot(directory: string): Promise<TraceSnapsho
   checkpointValues.forEach((checkpoint, index) =>
     collectArtifactReferences(checkpoint, `/checkpoints/${index}`, referenceMap),
   );
-  const artifacts = await loadArtifactMetadata(root, referenceMap, diagnostics);
+  const artifacts = await loadArtifactMetadata(root, referenceMap, diagnostics, maxArtifactBytes);
   const artifactReferences = new Map<string, readonly ArtifactReference[]>(
     [...referenceMap.entries()].map(([digest, references]) => [
       digest,
@@ -682,6 +762,12 @@ export async function loadTraceSnapshot(directory: string): Promise<TraceSnapsho
     const metadata = artifacts.get(digest);
     if (metadata === undefined || !metadata.exists) {
       throw new Error(`Artifact "${digest}" is missing.`);
+    }
+    if (
+      metadata.actual_byte_length !== undefined &&
+      metadata.actual_byte_length > maxArtifactBytes
+    ) {
+      throw new Error(`Artifact "${digest}" exceeds the configured read limit.`);
     }
     return new Uint8Array(await readFile(metadata.path));
   };

@@ -3,7 +3,6 @@ import {
   validateWorkflow,
   type EventEnvelope,
   type JsonSchema,
-  type JsonValue,
   type SideEffectLevel,
   type WorkflowDocument,
   type WorkflowNode,

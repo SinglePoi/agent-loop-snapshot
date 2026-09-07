@@ -66,6 +66,25 @@ test('loads artifact metadata and reports a mismatched artifact size', async () 
   assert.equal((await snapshot.readArtifact(digest)).byteLength, metadata.actual_byte_length);
 });
 
+test('limits untrusted event and artifact reads', async () => {
+  const eventLimited = await loadTraceSnapshot(resolve(schemaFixtures, 'minimal-success'), {
+    maxEventFileBytes: 1,
+  });
+  assert.equal(eventLimited.events.length, 0);
+  assert.ok(
+    eventLimited.diagnostics.some((diagnostic) => diagnostic.code === 'EVENT_FILE_TOO_LARGE'),
+  );
+
+  const digest = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+  const artifactLimited = await loadTraceSnapshot(resolve(schemaFixtures, 'corrupted-reference'), {
+    maxArtifactBytes: 1,
+  });
+  assert.ok(
+    artifactLimited.diagnostics.some((diagnostic) => diagnostic.code === 'ARTIFACT_TOO_LARGE'),
+  );
+  await assert.rejects(artifactLimited.readArtifact(digest), /exceeds the configured read limit/);
+});
+
 test('retains unknown-version events and reports schema diagnostics', async () => {
   const snapshot = await loadTraceSnapshot(resolve(schemaFixtures, 'unknown-version'));
 

@@ -2,6 +2,12 @@
   "name": "@agent-loop-snapshot/example-runtime",
   "version": "0.1.0",
   "private": true,
+  "files": [
+    "dist",
+    "fixtures",
+    "!dist/**/*.test.*",
+    "!dist/tsconfig.tsbuildinfo"
+  ],
   "type": "module",
   "bin": {
     "alsnap-example": "dist/cli.js"

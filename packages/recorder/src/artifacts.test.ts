@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -33,6 +33,62 @@ test('deduplicates concurrent writes of identical content', async () => {
     assert.equal(first.byte_length, Buffer.byteLength('same content'));
     assert.deepEqual(await store.listArtifacts(), [`sha256-${first.digest}`]);
   });
+});
+
+test('cleans up a failed artifact write and returns a structured diagnostic', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'alsnap-artifact-write-failure-'));
+  const store = await ArtifactStore.open(root, {
+    faultInjector: {
+      beforeWrite() {
+        throw new Error('simulated disk full');
+      },
+    },
+  });
+
+  try {
+    await assert.rejects(
+      store.put('cannot persist', { mediaType: 'text/plain' }),
+      (error: unknown) =>
+        error instanceof ArtifactStoreError &&
+        error.code === 'ARTIFACT_WRITE_FAILED' &&
+        error.message.includes('simulated disk full'),
+    );
+    assert.deepEqual(await store.listArtifacts(), []);
+    assert.equal(
+      (await readdir(root)).some((entry) => entry.endsWith('.tmp')),
+      false,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('cleans up a failed artifact commit and returns a structured diagnostic', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'alsnap-artifact-commit-failure-'));
+  const store = await ArtifactStore.open(root, {
+    faultInjector: {
+      beforeCommit() {
+        throw new Error('simulated atomic rename failure');
+      },
+    },
+  });
+
+  try {
+    await assert.rejects(
+      store.put('cannot commit', { mediaType: 'text/plain' }),
+      (error: unknown) =>
+        error instanceof ArtifactStoreError &&
+        error.code === 'ARTIFACT_WRITE_FAILED' &&
+        error.message.includes('simulated atomic rename failure'),
+    );
+    assert.deepEqual(await store.listArtifacts(), []);
+    assert.equal(
+      (await readdir(root)).some((entry) => entry.endsWith('.tmp')),
+      false,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('round-trips binary artifacts without decoding their media type', async () => {
