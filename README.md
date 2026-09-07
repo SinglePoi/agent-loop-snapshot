@@ -131,6 +131,7 @@ apps/
 pnpm install
 pnpm run check
 pnpm run benchmark:trace
+pnpm run benchmark:als-502
 ```
 
 CI 使用同一套 `pnpm run check` 质量门禁。`pnpm run benchmark:trace` 用于复测 100k Trace Loader 基线；核心包、Example Runtime 和 Mock Replay CLI 均已提供可构建入口。
@@ -188,6 +189,9 @@ pnpm run alsnap -- workflow run ./runs/run-123/workflow.yaml
 
 - [实施规划与任务清单](docs/implementation-plan.md)
 - [开发交接记录](docs/handoff.md)
+- [ALS-502 性能、并发与故障注入](docs/benchmarks/als-502.md)
+- [安全与发布指南](docs/security-and-release.md)
+- [变更日志](CHANGELOG.md)
 - [Workflow IR v0.1](docs/workflow-ir-v0.1.md)
 - [Schema compatibility and migration](docs/schema-compatibility.md)
 - [ADR-0001：使用 TypeScript 实现首个版本](docs/adr/0001-use-typescript.md)

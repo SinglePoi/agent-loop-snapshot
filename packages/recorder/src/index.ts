@@ -35,6 +35,10 @@ export interface RecorderIdGenerator {
 }
 
 export interface RecorderInterceptor {
+  /**
+   * Runs before an event becomes visible through the Recorder. Durable sinks
+   * should reject here so a failed write cannot advance in-memory run state.
+   */
   beforeAppend?(
     event: Readonly<EventEnvelope<string, unknown>>,
   ):
@@ -539,22 +543,22 @@ export class Recorder {
       }
     }
 
-    record.events.push(event);
-    record.nextSequence += 1;
-    onCommitted?.();
-
     for (const interceptor of this.interceptors) {
       try {
         await interceptor.afterAppend?.(event);
       } catch (error) {
         throw new RecorderError(
-          'INTERCEPTOR_FAILED_AFTER_COMMIT',
+          'INTERCEPTOR_FAILED_BEFORE_COMMIT',
           error instanceof Error
-            ? error.message
-            : 'An afterAppend interceptor failed after commit.',
+            ? `Event was not committed because an afterAppend interceptor failed: ${error.message}`
+            : 'Event was not committed because an afterAppend interceptor failed.',
         );
       }
     }
+
+    record.events.push(event);
+    record.nextSequence += 1;
+    onCommitted?.();
 
     return event as EventEnvelope<TType, TPayload>;
   }

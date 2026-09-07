@@ -58,6 +58,22 @@ test('validates reusable golden fixtures and reports expected failures', async (
   }
 });
 
+test('limits untrusted event and artifact reads during directory validation', async () => {
+  const fixtureDirectory = resolve(dirname(fileURLToPath(import.meta.url)), '../fixtures');
+  const events = await validateSnapshotDirectory(resolve(fixtureDirectory, 'minimal-success'), {
+    maxEventFileBytes: 1,
+  });
+  assert.ok(events.diagnostics.some((diagnostic) => diagnostic.code === 'EVENT_FILE_TOO_LARGE'));
+
+  const artifacts = await validateSnapshotDirectory(
+    resolve(fixtureDirectory, 'corrupted-reference'),
+    {
+      maxArtifactBytes: 1,
+    },
+  );
+  assert.ok(artifacts.diagnostics.some((diagnostic) => diagnostic.code === 'ARTIFACT_TOO_LARGE'));
+});
+
 function workflowFixture(): WorkflowDocument {
   return {
     schema_version: '0.1.0',

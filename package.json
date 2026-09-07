@@ -17,9 +17,14 @@
     "format": "prettier --write \"**/*.{js,json,ts,yml,yaml}\"",
     "format:check": "prettier --check \"**/*.{js,json,ts,yml,yaml}\"",
     "benchmark:trace": "pnpm build && node packages/trace/benchmarks/loader-100k.js",
+    "benchmark:recorder": "pnpm build && node packages/recorder/benchmarks/recorder-10k.js",
+    "benchmark:graph": "pnpm build && node packages/graph/benchmarks/project-100k.js",
+    "benchmark:als-502": "pnpm benchmark:recorder && pnpm benchmark:trace && pnpm benchmark:graph",
+    "pack:check": "pnpm build && pnpm -r --filter \"./packages/*\" pack --dry-run",
     "alsnap": "node packages/cli/dist/index.js",
     "test": "pnpm build && node --test packages/schema/dist/index.test.js packages/recorder/dist/index.test.js packages/recorder/dist/writer.test.js packages/recorder/dist/artifacts.test.js packages/recorder/dist/checkpoints.test.js packages/recorder/dist/redaction.test.js packages/trace/dist/index.test.js packages/graph/dist/index.test.js packages/replay/dist/index.test.js packages/cli/dist/index.test.js packages/example-runtime/dist/index.test.js",
     "check": "pnpm typecheck && pnpm lint && pnpm format:check && pnpm test",
+    "release:verify": "pnpm run check && pnpm run pack:check && node scripts/release-smoke.js",
     "clean": "tsc -b --clean"
   },
   "devDependencies": {

@@ -1,6 +1,6 @@
 # Agent Loop Snapshot 交接记录
 
-更新时间：2026-09-06
+更新时间：2026-09-07
 
 ## 当前进度
 
@@ -23,6 +23,8 @@
 - ALS-302：实现副作用 Policy Engine、当前授权检查、执行守卫与 Replay Trace 审计事件。
 - ALS-303：实现基于 recorded-result adapter 的 Mock Replay Runner、新 Replay Trace 与结构化调用差异。
 - ALS-304：实现 checkpoint resume、经策略守卫的 live adapter 验证回放，以及声明式差异比较。
+- ALS-502：实现 Recorder/Trace/Graph 基准、并发压力与存储故障注入，保证写入失败不会发布虚假的成功状态。
+- ALS-503：完成不可信快照输入限制、安全/发布文档、受限 tarball 内容与 clean-install 发布 smoke。
 
 ## ALS-103 已实现内容
 
@@ -156,7 +158,7 @@ M2 收尾补充：
 
 ## 里程碑状态
 
-M1 的 ALS-001 至 ALS-106、M2 的 ALS-201 至 ALS-203、M3 的 ALS-301 至 ALS-304、M4 的 ALS-401 至 ALS-404，以及 M5 的 ALS-501 均已完成。M3 收尾已补齐：`alsnap replay --mode mock --output <directory>` 会落盘一个新快照，artifact-backed state 会被物化，且 Windows 与 Unix 的换行差异不再导致测试失败。固定示例快照继续作为 Trace Loader、Graph、CLI 和 Replay 的端到端夹具；Workflow IR、Trace Compiler、Semantic Replay、Runtime 兼容性检查与 Schema 迁移已构成受策略保护的工作流回放闭环。
+M1 的 ALS-001 至 ALS-106、M2 的 ALS-201 至 ALS-203、M3 的 ALS-301 至 ALS-304、M4 的 ALS-401 至 ALS-404，以及 M5 的 ALS-501 至 ALS-503 均已完成。M3 收尾已补齐：`alsnap replay --mode mock --output <directory>` 会落盘一个新快照，artifact-backed state 会被物化，且 Windows 与 Unix 的换行差异不再导致测试失败。固定示例快照继续作为 Trace Loader、Graph、CLI 和 Replay 的端到端夹具；Workflow IR、Trace Compiler、Semantic Replay、Runtime 兼容性检查与 Schema 迁移已构成受策略保护的工作流回放闭环。
 
 ## 验证结果
 
@@ -174,18 +176,17 @@ Prettier：通过
 
 ## 下一步
 
-建议继续执行 `ALS-502`：性能、并发和故障注入。重点是：
+当前规划内的 ALS-001 至 ALS-503 已完成。下一步需要产品/发布负责人确认：
 
-1. 测量 Recorder 延迟、吞吐、磁盘占用与 Graph 构建耗时，并将阈值和基线记录在仓库；
-2. 注入进程终止、磁盘写入失败、损坏 artifact 和并发乱序完成；
-3. 为并发 Recorder 添加压力测试，并确保部分成功状态始终产生明确诊断；
-4. 保留现有 100k Trace Loader 基准，并补齐新性能/故障夹具。
+1. npm registry 与正式 package scope；
+2. 首个公开版本号、发布负责人和变更日志发布日期；
+3. 是否解除 workspace 包的 `private` 保护并启用 CI 发布凭据。
 
 ## 新会话提示
 
 新会话开始时可直接粘贴：
 
-> 请阅读 `docs/handoff.md`、`docs/schema-compatibility.md` 和 `docs/implementation-plan.md`，基于当前工作区继续执行 ALS-502。保留现有 ALS-001 至 ALS-501 实现，先检查当前代码和测试，再实现性能、并发和故障注入。
+> 请阅读 `docs/handoff.md`、`docs/security-and-release.md` 和 `docs/implementation-plan.md`。ALS-001 至 ALS-503 已完成；在确定 registry、package scope 和版本策略前，不要移除 package 的 `private` 标志或尝试发布。
 
 ## 工作区注意事项
 

@@ -6,7 +6,7 @@ import test from 'node:test';
 
 import type { EventEnvelope, EventId, RunId, SnapshotManifest } from '@agent-loop-snapshot/schema';
 
-import { Recorder } from './index.js';
+import { Recorder, RecorderError } from './index.js';
 import {
   JsonlEventWriter,
   SnapshotWriter,
@@ -142,6 +142,49 @@ test('can persist Recorder events through an interceptor', async () => {
     assert.equal(inspection.events.events.length, 3);
     assert.equal(inspection.events.diagnostics.length, 0);
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('keeps the Recorder and snapshot explicitly unfinished when an event write fails', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'alsnap-write-failure-'));
+  const writer = await SnapshotWriter.open(root, {
+    flushMode: 'event',
+    faultInjector: {
+      beforeWrite(event) {
+        if (event.sequence === 2) {
+          throw new Error('simulated disk full');
+        }
+      },
+    },
+  });
+  const recorder = new Recorder({ interceptors: [writer.asInterceptor()] });
+
+  try {
+    const run = await recorder.startRun({
+      runtime: { name: 'test-runtime', version: '0.1.0' },
+    });
+    await assert.rejects(
+      recorder.appendEvent(run.context(), {
+        type: 'state.changed',
+        payload: { path: '/durable', operation: 'set', value: false },
+      }),
+      (error: unknown) =>
+        error instanceof RecorderError &&
+        error.code === 'INTERCEPTOR_FAILED_BEFORE_COMMIT' &&
+        error.message.includes('simulated disk full'),
+    );
+
+    assert.equal(recorder.getEvents(run).length, 1);
+    assert.equal(recorder.getManifest(run).event_count, 1);
+    assert.equal(run.status, 'running');
+
+    const inspection = await inspectSnapshotDirectory(root);
+    assert.equal(inspection.events.events.length, 1);
+    assert.equal(inspection.unfinished, true);
+    assert.ok(inspection.diagnostics.some((diagnostic) => diagnostic.code === 'UNFINISHED_RUN'));
+  } finally {
+    await writer.close();
     await rm(root, { recursive: true, force: true });
   }
 });

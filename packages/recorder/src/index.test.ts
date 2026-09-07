@@ -89,6 +89,47 @@ test('serializes concurrent branches and preserves shared parent context', async
   assert.deepEqual(merged.parent_ids, [left.event_id, right.event_id]);
 });
 
+test('survives concurrent pressure and preserves call-arrival order for out-of-order completions', async () => {
+  const recorder = createRecorder();
+  const run = await recorder.startRun({
+    runtime: { name: 'test-runtime', version: '0.1.0' },
+  });
+  const branchContext = run.context();
+  const eventCount = 500;
+
+  const events = await Promise.all(
+    Array.from({ length: eventCount }, (_, index) =>
+      recorder.appendEvent(branchContext, {
+        type: 'tool.completed',
+        payload: { correlation_key: `stress-${String(index)}`, output: { index } },
+      }),
+    ),
+  );
+  const delayed = (async () => {
+    await new Promise<void>((resolve) => setTimeout(resolve, 15));
+    return recorder.appendEvent(branchContext, {
+      type: 'tool.completed',
+      payload: { correlation_key: 'slow-arrival', output: { order: 'slow' } },
+    });
+  })();
+  const immediate = recorder.appendEvent(branchContext, {
+    type: 'tool.completed',
+    payload: { correlation_key: 'fast-arrival', output: { order: 'fast' } },
+  });
+  const [slow, fast] = await Promise.all([delayed, immediate]);
+
+  const recorded = recorder.getEvents(run);
+  assert.equal(recorded.length, eventCount + 3);
+  assert.equal(new Set(recorded.map((event) => event.event_id)).size, recorded.length);
+  assert.deepEqual(
+    recorded.map((event) => event.sequence),
+    Array.from({ length: eventCount + 3 }, (_, index) => index + 1),
+  );
+  assert.ok(events.every((event) => event.parent_ids[0] === run.startedEvent.event_id));
+  assert.equal(fast.sequence, eventCount + 2);
+  assert.equal(slow.sequence, eventCount + 3);
+});
+
 test('records a failed terminal state and rejects later completion', async () => {
   const recorder = createRecorder();
   const run = await recorder.startRun({

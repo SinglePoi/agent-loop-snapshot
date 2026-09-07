@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFile, readdir } from 'node:fs/promises';
+import { lstat, readFile, readdir } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,6 +17,15 @@ import {
 } from './index.js';
 
 const snapshotSchemaVersion = '0.1.0';
+export const defaultSnapshotDirectoryValidationLimits = {
+  maxEventFileBytes: 64 * 1024 * 1024,
+  maxArtifactBytes: 64 * 1024 * 1024,
+} as const;
+
+export interface SnapshotDirectoryValidationOptions {
+  maxEventFileBytes?: number;
+  maxArtifactBytes?: number;
+}
 const schemaFiles = {
   artifactReference: 'artifact-reference.schema.json',
   checkpoint: 'checkpoint.schema.json',
@@ -623,10 +632,34 @@ async function readJsonFile(
 async function readEventsFile(
   filePath: string,
   diagnostics: ValidationDiagnostic[],
+  maxBytes: number,
 ): Promise<unknown[]> {
   let content: string;
 
   try {
+    const fileStats = await lstat(filePath);
+    if (!fileStats.isFile()) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'UNTRUSTED_EVENTS_FILE',
+        path: '/events',
+        message: 'events.jsonl must be a regular file inside the snapshot directory.',
+        source: 'events',
+        file: basename(filePath),
+      });
+      return [];
+    }
+    if (fileStats.size > maxBytes) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'EVENT_FILE_TOO_LARGE',
+        path: '/events',
+        message: `events.jsonl is ${String(fileStats.size)} bytes, exceeding the ${String(maxBytes)} byte limit.`,
+        source: 'events',
+        file: basename(filePath),
+      });
+      return [];
+    }
     content = await readFile(filePath, 'utf8');
   } catch (error) {
     diagnostics.push({
@@ -697,6 +730,7 @@ async function validateArtifactFiles(
   snapshotDirectory: string,
   document: SnapshotDocument,
   diagnostics: ValidationDiagnostic[],
+  maxArtifactBytes: number,
 ): Promise<void> {
   const references: Array<{ path: string; reference: ArtifactReference }> = [];
   collectArtifactReferences(document.manifest, '/manifest', references);
@@ -716,6 +750,30 @@ async function validateArtifactFiles(
     let contents: Buffer;
 
     try {
+      const fileStats = await lstat(artifactPath);
+      if (!fileStats.isFile()) {
+        diagnostics.push({
+          severity: 'error',
+          code: 'UNTRUSTED_ARTIFACT_ENTRY',
+          path,
+          message:
+            'Referenced artifact must be a regular file inside the snapshot artifact directory.',
+          source: 'integrity',
+          file: artifactPath,
+        });
+        continue;
+      }
+      if (fileStats.size > maxArtifactBytes) {
+        diagnostics.push({
+          severity: 'error',
+          code: 'ARTIFACT_TOO_LARGE',
+          path,
+          message: `Artifact is ${String(fileStats.size)} bytes, exceeding the ${String(maxArtifactBytes)} byte limit.`,
+          source: 'integrity',
+          file: artifactPath,
+        });
+        continue;
+      }
       contents = await readFile(artifactPath);
     } catch (error) {
       diagnostics.push({
@@ -754,10 +812,29 @@ async function validateArtifactFiles(
   }
 }
 
+function limit(value: number | undefined, fallback: number, name: string): number {
+  const resolved = value ?? fallback;
+  if (!Number.isSafeInteger(resolved) || resolved < 1) {
+    throw new RangeError(`${name} must be a positive safe integer.`);
+  }
+  return resolved;
+}
+
 export async function validateSnapshotDirectory(
   snapshotDirectory: string,
+  options: SnapshotDirectoryValidationOptions = {},
 ): Promise<ValidationResult> {
   const root = resolve(snapshotDirectory);
+  const maxEventFileBytes = limit(
+    options.maxEventFileBytes,
+    defaultSnapshotDirectoryValidationLimits.maxEventFileBytes,
+    'maxEventFileBytes',
+  );
+  const maxArtifactBytes = limit(
+    options.maxArtifactBytes,
+    defaultSnapshotDirectoryValidationLimits.maxArtifactBytes,
+    'maxArtifactBytes',
+  );
   const diagnostics: ValidationDiagnostic[] = [];
   const manifest = await readJsonFile(
     join(root, 'manifest.json'),
@@ -765,13 +842,13 @@ export async function validateSnapshotDirectory(
     '/manifest',
     diagnostics,
   );
-  const events = await readEventsFile(join(root, 'events.jsonl'), diagnostics);
+  const events = await readEventsFile(join(root, 'events.jsonl'), diagnostics, maxEventFileBytes);
   const checkpoints = await readCheckpoints(join(root, 'checkpoints'), diagnostics);
   const document: SnapshotDocument = { manifest, events, checkpoints };
   const result = validateSnapshot(document);
 
   diagnostics.push(...result.diagnostics);
-  await validateArtifactFiles(root, document, diagnostics);
+  await validateArtifactFiles(root, document, diagnostics, maxArtifactBytes);
 
   return {
     valid: diagnostics.every((diagnostic) => diagnostic.severity !== 'error'),

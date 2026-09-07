@@ -14,6 +14,16 @@ export interface PutArtifactOptions {
   preview?: string;
 }
 
+/** Explicit test hook for exercising artifact write and commit failures. */
+export interface ArtifactStoreFaultInjector {
+  beforeWrite?(digest: string): void | Promise<void>;
+  beforeCommit?(digest: string): void | Promise<void>;
+}
+
+export interface ArtifactStoreOptions {
+  faultInjector?: ArtifactStoreFaultInjector;
+}
+
 export type ArtifactIntegrityCode =
   | 'VALID'
   | 'MISSING_ARTIFACT'
@@ -36,7 +46,11 @@ export interface ArtifactReferenceDiagnostic {
 
 export class ArtifactStoreError extends Error {
   constructor(
-    readonly code: ArtifactIntegrityCode | 'INVALID_ARTIFACT_CONTENT' | 'INVALID_MEDIA_TYPE',
+    readonly code:
+      | ArtifactIntegrityCode
+      | 'ARTIFACT_WRITE_FAILED'
+      | 'INVALID_ARTIFACT_CONTENT'
+      | 'INVALID_MEDIA_TYPE',
     message: string,
   ) {
     super(message);
@@ -111,14 +125,16 @@ function errorMessage(error: unknown, fallback: string): string {
 
 export class ArtifactStore {
   private readonly directory: string;
+  private readonly faultInjector: ArtifactStoreFaultInjector | undefined;
   private readonly writeQueues = new Map<string, Promise<void>>();
 
-  private constructor(directory: string) {
+  private constructor(directory: string, options: ArtifactStoreOptions) {
     this.directory = resolve(directory);
+    this.faultInjector = options.faultInjector;
   }
 
-  static async open(directory: string): Promise<ArtifactStore> {
-    const store = new ArtifactStore(directory);
+  static async open(directory: string, options: ArtifactStoreOptions = {}): Promise<ArtifactStore> {
+    const store = new ArtifactStore(directory, options);
     await mkdir(store.directory, { recursive: true });
     return store;
   }
@@ -159,22 +175,32 @@ export class ArtifactStore {
 
       try {
         temporaryHandle = await open(temporaryPath, 'wx');
+        await this.faultInjector?.beforeWrite?.(digest);
         await temporaryHandle.writeFile(contents);
         await temporaryHandle.sync();
         await temporaryHandle.close();
         temporaryHandle = undefined;
 
         try {
+          await this.faultInjector?.beforeCommit?.(digest);
           await rename(temporaryPath, targetPath);
         } catch (error) {
           const raced = await this.verify(reference);
           if (!raced.valid) {
             throw new ArtifactStoreError(
-              raced.code,
+              'ARTIFACT_WRITE_FAILED',
               `Could not install artifact ${digest}: ${errorMessage(error, raced.message)}`,
             );
           }
         }
+      } catch (error) {
+        if (error instanceof ArtifactStoreError) {
+          throw error;
+        }
+        throw new ArtifactStoreError(
+          'ARTIFACT_WRITE_FAILED',
+          `Could not write artifact ${digest}: ${errorMessage(error, 'unknown write error')}`,
+        );
       } finally {
         await temporaryHandle?.close().catch(() => undefined);
         await rm(temporaryPath, { force: true }).catch(() => undefined);

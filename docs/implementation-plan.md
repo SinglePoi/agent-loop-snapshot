@@ -655,6 +655,13 @@ flowchart LR
 - 故障不会产生看似成功但不可验证的快照。
 - 所有部分成功状态都有明确诊断。
 
+**完成记录（2026-09-07）**
+
+- 新增 Recorder 10k、Trace Loader 100k 和 Graph Projector 100k 基准脚本，以及 `benchmark:als-502` 聚合入口；首次本机结果、同机回归阈值和运行方式记录在 `docs/benchmarks/als-502.md`。
+- Recorder 的耐久性边界移动到事件发布前：JSONL 写入失败时，内存事件、sequence、manifest event count 和终态均不会推进；落盘快照保持 `UNFINISHED_RUN` 诊断，而不会表现为可验证成功。
+- `JsonlWriterFaultInjector` 和 `ArtifactStoreFaultInjector` 覆盖模拟磁盘写入失败；Artifact 写入失败会清理临时文件并返回 `ARTIFACT_WRITE_FAILED`，篡改、尾部截断和未完成 manifest 均持续返回结构化诊断。
+- 新增 500 路并发 Recorder 压力与延迟到达测试，验证唯一事件 ID、无间隙 sequence、共享父事件和实际到达顺序。
+
 #### ALS-503：安全审查与发布准备
 
 **工作内容**
@@ -668,6 +675,13 @@ flowchart LR
 - Viewer 和 CLI 将快照内容视为不可信输入。
 - 解包和 artifact 读取限制在目标目录内，并配置大小限制。
 - 发布包可在干净环境完成安装、示例记录、图导出和 Mock Replay。
+
+**完成记录（2026-09-07）**
+
+- `Trace Loader` 与 `validateSnapshotDirectory()` 现在默认限制 `events.jsonl` 和单一 artifact 为 64 MiB，并允许调用方以 `maxEventFileBytes`、`maxArtifactBytes` 收紧限制；超限输入产生结构化诊断，不继续读取。
+- 事件与 artifact 仅接受快照目录内的常规文件；符号链接、目录或特殊条目被标记为不可信。系统不解压 archive，也不会执行来自快照或 artifact 的脚本。
+- 新增安全与发布指南、变更日志、tarball `files` 白名单，以及 `pack:check` / `release:verify`。发布 smoke 会在临时消费者目录中从本地 tarball 安装所有内部包，再验证、导图并 Mock Replay 脱敏示例快照。
+- 所有包在当前仍为 `private`，需要在已确定 registry、npm scope 与发布负责人后另行审查并解除该保护。
 
 ## 7. 建议迭代顺序
 
