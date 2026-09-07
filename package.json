@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Portable recording, inspection, visualization, and replay for agent loops.",
-  "license": "Apache-2.0",
+  "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@11.19.0",
   "engines": {
