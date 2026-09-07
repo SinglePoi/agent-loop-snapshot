@@ -2,7 +2,7 @@
 
 Agent Loop Snapshot 是一个面向 Agent Runtime 的运行记录、可视化与回放工具。它把一次 Agent Loop 中的模型调用、工具调用、状态变化、检查点和产物保存为可移植快照，并可进一步生成流程图或编译为可执行工作流，让另一个 Agent 在明确的权限和验证规则下复现任务。
 
-> 当前状态：基础协议、Recorder、耐崩溃写入、Artifact Store、Checkpoint Store、Trace Loader、Graph Projector 和 CLI 已实现；Replay 仍在开发中，尚未发布可用版本。
+> 当前状态：基础协议、Recorder、耐崩溃写入、Artifact Store、Checkpoint Store、Trace Loader、Graph Projector 和 CLI 已实现；Replay Adapter、Policy Engine、Mock Replay、Checkpoint Resume 与 Verified Replay 已就绪，工作流与语义回放仍在开发中。
 
 ## 项目目标
 
@@ -123,7 +123,7 @@ pnpm run check
 pnpm run benchmark:trace
 ```
 
-CI 使用同一套 `pnpm run check` 质量门禁。`pnpm run benchmark:trace` 用于复测 100k Trace Loader 基线；核心包和 Example Runtime 已提供可构建入口，后续任务将进入安全回放能力。
+CI 使用同一套 `pnpm run check` 质量门禁。`pnpm run benchmark:trace` 用于复测 100k Trace Loader 基线；核心包、Example Runtime 和 Mock Replay CLI 均已提供可构建入口。
 
 TypeScript 技术决策记录在 [ADR-0001](docs/adr/0001-use-typescript.md)。未来可以依据相同 JSON Schema 增加 Python SDK，但不会为此复制或分叉快照协议。
 
@@ -139,11 +139,15 @@ pnpm run alsnap -- graph ./runs/run-123 --kind timeline --format json
 pnpm run alsnap -- graph ./runs/run-123 --actor agent.main --type tool.completed
 ```
 
-回放和 Workflow 命令仍在规划中：
+Mock Replay 会将记录的模型和工具结果写入一个新的快照；输出目录必须不存在：
 
 ```bash
-pnpm run alsnap -- replay ./runs/run-123 --mode mock
-pnpm run alsnap -- replay ./runs/run-123 --mode verified
+pnpm run alsnap -- replay ./runs/run-123 --mode mock --output ./runs/run-123-mock-replay
+```
+
+Verified Replay 需要调用方在 SDK 中显式配置 live adapters 和当前授权；Workflow 命令仍在规划中：
+
+```bash
 pnpm run alsnap -- workflow compile ./runs/run-123
 pnpm run alsnap -- workflow run ./runs/run-123/workflow.yaml
 ```

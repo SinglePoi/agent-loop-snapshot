@@ -1,5 +1,12 @@
+export const replayPackageName = '@agent-loop-snapshot/replay' as const;
+
 export interface ReplayRunner {
-  readonly packageName: '@agent-loop-snapshot/replay';
+  readonly packageName: typeof replayPackageName;
 }
 
-export const replayPackageName: ReplayRunner['packageName'] = '@agent-loop-snapshot/replay';
+export * from './adapters.js';
+export * from './correlation.js';
+export * from './mock.js';
+export * from './policy.js';
+export * from './recorded.js';
+export * from './verified.js';

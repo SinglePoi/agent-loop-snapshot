@@ -18,7 +18,7 @@
     "format:check": "prettier --check \"**/*.{js,json,ts,yml,yaml}\"",
     "benchmark:trace": "pnpm build && node packages/trace/benchmarks/loader-100k.js",
     "alsnap": "node packages/cli/dist/index.js",
-    "test": "pnpm build && node --test packages/schema/dist/index.test.js packages/recorder/dist/index.test.js packages/recorder/dist/writer.test.js packages/recorder/dist/artifacts.test.js packages/recorder/dist/checkpoints.test.js packages/recorder/dist/redaction.test.js packages/trace/dist/index.test.js packages/graph/dist/index.test.js packages/cli/dist/index.test.js packages/example-runtime/dist/index.test.js",
+    "test": "pnpm build && node --test packages/schema/dist/index.test.js packages/recorder/dist/index.test.js packages/recorder/dist/writer.test.js packages/recorder/dist/artifacts.test.js packages/recorder/dist/checkpoints.test.js packages/recorder/dist/redaction.test.js packages/trace/dist/index.test.js packages/graph/dist/index.test.js packages/replay/dist/index.test.js packages/cli/dist/index.test.js packages/example-runtime/dist/index.test.js",
     "check": "pnpm typecheck && pnpm lint && pnpm format:check && pnpm test",
     "clean": "tsc -b --clean"
   },

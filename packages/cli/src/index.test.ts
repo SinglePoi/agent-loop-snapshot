@@ -1,6 +1,7 @@
 import { strict as assert } from 'node:assert';
-import { readFile } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
@@ -124,8 +125,41 @@ test('graph Mermaid output matches the stable golden document', async () => {
   );
 
   assert.equal(exitCode, cliExitCodes.success);
-  assert.equal(captured.stdout.join(''), expected);
+  assert.equal(
+    captured.stdout.join('').replaceAll('\r\n', '\n'),
+    expected.replaceAll('\r\n', '\n'),
+  );
   assert.equal(captured.stderr.length, 0);
+});
+
+test('replay creates a valid mock replay snapshot', async () => {
+  const outputDirectory = await mkdtemp(join(tmpdir(), 'alsnap-cli-replay-'));
+  await rm(outputDirectory, { recursive: true, force: true });
+  const captured = captureIo();
+
+  try {
+    const exitCode = await runCli(
+      ['replay', fixtureDirectory, '--mode', 'mock', '--output', outputDirectory, '--json'],
+      captured.io,
+    );
+    const output = JSON.parse(captured.stdout.join('')) as {
+      command: string;
+      valid: boolean;
+      terminal_status: string;
+      output_directory: string;
+    };
+
+    assert.equal(exitCode, cliExitCodes.success);
+    assert.equal(captured.stderr.length, 0);
+    assert.deepEqual(output, {
+      command: 'replay',
+      valid: true,
+      terminal_status: 'completed',
+      output_directory: outputDirectory,
+    });
+  } finally {
+    await rm(outputDirectory, { recursive: true, force: true });
+  }
 });
 
 test('CLI usage errors use exit code 1 and JSON error output', async () => {

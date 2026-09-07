@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { existsSync } from 'node:fs';
 import { basename, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -20,6 +21,8 @@ import {
   type TraceDiagnostic,
   type TraceSnapshot,
 } from '@agent-loop-snapshot/trace';
+import { Recorder, SnapshotWriter } from '@agent-loop-snapshot/recorder';
+import { MockReplayRunner } from '@agent-loop-snapshot/replay';
 
 export const cliPackageName = '@agent-loop-snapshot/cli' as const;
 export const cliVersion = '0.1.0' as const;
@@ -30,8 +33,9 @@ export const cliExitCodes = {
   validationFailed: 2,
 } as const;
 
-type CommandName = 'validate' | 'inspect' | 'graph';
+type CommandName = 'validate' | 'inspect' | 'graph' | 'replay';
 type OutputFormat = 'text' | 'json' | 'mermaid';
+type ReplayMode = 'mock';
 
 const graphKinds = new Set<GraphProjectionKind>(['causal-dag', 'call-tree', 'timeline']);
 const graphStatuses = new Set<GraphNodeStatus>([
@@ -99,6 +103,8 @@ interface ParsedCommand {
   readonly graphKind: GraphProjectionKind;
   readonly filter: GraphFilter;
   readonly foldNoise: boolean;
+  readonly replayMode?: ReplayMode;
+  readonly outputDirectory?: string;
 }
 
 class CliUsageError extends Error {
@@ -158,9 +164,14 @@ function parseFormat(value: string): OutputFormat {
 function parseCommand(argv: readonly string[]): ParsedCommand {
   const commandValue = argv[0];
   if (commandValue === undefined || commandValue.startsWith('-')) {
-    throw new CliUsageError('A command is required: validate, inspect, or graph.');
+    throw new CliUsageError('A command is required: validate, inspect, graph, or replay.');
   }
-  if (commandValue !== 'validate' && commandValue !== 'inspect' && commandValue !== 'graph') {
+  if (
+    commandValue !== 'validate' &&
+    commandValue !== 'inspect' &&
+    commandValue !== 'graph' &&
+    commandValue !== 'replay'
+  ) {
     throw new CliUsageError(`Unknown command "${commandValue}".`);
   }
 
@@ -173,6 +184,8 @@ function parseCommand(argv: readonly string[]): ParsedCommand {
   let minSequence: number | undefined;
   let maxSequence: number | undefined;
   let foldNoise = true;
+  let replayMode: ReplayMode | undefined;
+  let outputDirectory: string | undefined;
 
   for (let index = 1; index < argv.length; index += 1) {
     const argument = argv[index];
@@ -181,6 +194,22 @@ function parseCommand(argv: readonly string[]): ParsedCommand {
     }
     if (argument === '--json') {
       format = 'json';
+      continue;
+    }
+    if (argument === '--mode' || argument.startsWith('--mode=')) {
+      const value = argument.startsWith('--mode=')
+        ? argument.slice('--mode='.length)
+        : readOptionValue(argv, index++, '--mode');
+      if (value !== 'mock') {
+        throw new CliUsageError('Only --mode mock is currently available from the CLI.');
+      }
+      replayMode = value;
+      continue;
+    }
+    if (argument === '--output' || argument.startsWith('--output=')) {
+      outputDirectory = argument.startsWith('--output=')
+        ? argument.slice('--output='.length)
+        : readOptionValue(argv, index++, '--output');
       continue;
     }
     if (argument === '--no-fold-noise') {
@@ -250,6 +279,12 @@ function parseCommand(argv: readonly string[]): ParsedCommand {
   if (directory === undefined) {
     throw new CliUsageError('A snapshot directory is required.');
   }
+  if (commandValue === 'replay' && replayMode === undefined) {
+    throw new CliUsageError('replay requires --mode mock.');
+  }
+  if (commandValue === 'replay' && outputDirectory === undefined) {
+    throw new CliUsageError('replay requires --output <replay-directory>.');
+  }
   if (commandValue !== 'graph' && (format === 'mermaid' || graphKind !== 'causal-dag')) {
     throw new CliUsageError('--format mermaid and --kind are only supported by graph.');
   }
@@ -263,6 +298,9 @@ function parseCommand(argv: readonly string[]): ParsedCommand {
       maxSequence !== undefined)
   ) {
     throw new CliUsageError('Graph filters and noise folding options are only supported by graph.');
+  }
+  if (commandValue !== 'replay' && (replayMode !== undefined || outputDirectory !== undefined)) {
+    throw new CliUsageError('--mode and --output are only supported by replay.');
   }
   if (minSequence !== undefined && maxSequence !== undefined && minSequence > maxSequence) {
     throw new CliUsageError('--min-sequence cannot be greater than --max-sequence.');
@@ -281,6 +319,8 @@ function parseCommand(argv: readonly string[]): ParsedCommand {
       ...(maxSequence === undefined ? {} : { maxSequence }),
     },
     foldNoise,
+    ...(replayMode === undefined ? {} : { replayMode }),
+    ...(outputDirectory === undefined ? {} : { outputDirectory: resolve(outputDirectory) }),
   };
 }
 
@@ -575,6 +615,14 @@ function usage(command?: CommandName): string {
       '  --json                                  Alias for --format json',
     ].join('\n');
   }
+  if (command === 'replay') {
+    return [
+      'Usage: alsnap replay <snapshot-directory> --mode mock --output <replay-directory> [--json]',
+      '',
+      'Create a new snapshot by replaying saved model and tool results.',
+      'Verified replay requires explicitly configured live adapters through the SDK.',
+    ].join('\n');
+  }
   return [
     'Agent Loop Snapshot CLI',
     '',
@@ -584,6 +632,7 @@ function usage(command?: CommandName): string {
     '  validate  Validate a snapshot and report diagnostics',
     '  inspect   Print a metadata-only run summary',
     '  graph     Export a causal DAG, call tree, or timeline',
+    '  replay    Create a mock replay snapshot from recorded results',
     '',
     'Global options: --help, --version, --json',
   ].join('\n');
@@ -603,7 +652,10 @@ export async function runCli(
   const commandValue = argv[0];
   if (commandValue === '--help' || commandValue === '-h' || argv.includes('--help')) {
     const command =
-      commandValue === 'validate' || commandValue === 'inspect' || commandValue === 'graph'
+      commandValue === 'validate' ||
+      commandValue === 'inspect' ||
+      commandValue === 'graph' ||
+      commandValue === 'replay'
         ? commandValue
         : undefined;
     io.stdout(`${usage(command)}\n`);
@@ -646,6 +698,62 @@ export async function runCli(
     }
 
     const snapshot = await loadTraceSnapshot(command.directory);
+    if (command.name === 'replay') {
+      const outputDirectory = command.outputDirectory;
+      if (outputDirectory === undefined || command.replayMode !== 'mock') {
+        throw new CliUsageError('replay requires --mode mock and --output <replay-directory>.');
+      }
+      if (outputDirectory === command.directory) {
+        throw new CliUsageError(
+          'The replay output directory must differ from the source snapshot.',
+        );
+      }
+      if (existsSync(outputDirectory)) {
+        throw new CliUsageError('The replay output directory must not already exist.');
+      }
+      if (!snapshot.valid) {
+        const diagnostics = snapshotJsonDiagnostics(command.directory, snapshot);
+        if (command.format === 'json') {
+          writeJson(io, {
+            command: command.name,
+            directory: command.directory,
+            valid: false,
+            diagnostics,
+          });
+        } else {
+          io.stdout('INVALID\n');
+          writeDiagnosticsText(io, diagnostics);
+        }
+        return cliExitCodes.validationFailed;
+      }
+
+      const writer = await SnapshotWriter.open(outputDirectory, { flushMode: 'event' });
+      try {
+        const recorder = new Recorder({ interceptors: [writer.asInterceptor()] });
+        const result = await new MockReplayRunner({ source: snapshot, recorder }).run();
+        await writer.commit(result.manifest);
+        const validation = await validateSnapshotDirectory(outputDirectory);
+        const valid =
+          result.manifest.terminal_status === 'completed' &&
+          validation.valid &&
+          result.diagnostics.length === 0;
+        if (command.format === 'json') {
+          writeJson(io, {
+            command: command.name,
+            valid,
+            terminal_status: result.manifest.terminal_status,
+            output_directory: outputDirectory,
+          });
+        } else {
+          io.stdout(`${valid ? 'REPLAYED' : 'REPLAY_FAILED'}\n`);
+          io.stdout(`Snapshot: ${outputDirectory}\n`);
+          io.stdout(`Status: ${result.manifest.terminal_status}\n`);
+        }
+        return valid ? cliExitCodes.success : cliExitCodes.runtimeError;
+      } finally {
+        await writer.close();
+      }
+    }
     if (command.name === 'inspect') {
       const summary = createInspectSummary(snapshot);
       const errors = inspectErrors(snapshot);
