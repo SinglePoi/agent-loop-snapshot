@@ -4,15 +4,21 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import type { EventEnvelope, RunId } from '@agent-loop-snapshot/schema';
+import type {
+  ArtifactReference,
+  Checkpoint,
+  EventEnvelope,
+  RunId,
+} from '@agent-loop-snapshot/schema';
 
-import { Recorder } from './index.js';
+import { Recorder, hashState, reconstructState } from './index.js';
+import { CheckpointStore } from './checkpoints.js';
 import {
   RedactionPipeline,
   createDefaultRedactionPipeline,
   type FieldRedactionRule,
 } from './redaction.js';
-import { SnapshotWriter } from './writer.js';
+import { SnapshotWriter, scanJsonlFile } from './writer.js';
 
 const runId = 'run_00000000-0000-4000-8000-000000000301' as RunId;
 
@@ -154,4 +160,171 @@ test('runs redaction before the SnapshotWriter persistence boundary', async () =
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('redacts checkpoint state before SnapshotWriter persists it and preserves recovery hashes', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'alsnap-redacted-checkpoint-'));
+  const writer = await SnapshotWriter.open(root, { flushMode: 'event' });
+  const pipeline = createDefaultRedactionPipeline();
+  const recorder = new Recorder({
+    interceptors: [pipeline.asInterceptor(), writer.asInterceptor()],
+  });
+  const secret = 'sk-reviewsecret123456789';
+  const originalState = {
+    api_key: secret,
+    nested: { token: secret },
+    users: [{ token: secret }],
+  };
+
+  try {
+    const run = await recorder.startRun({
+      runtime: { name: 'test-runtime', version: '0.1.0' },
+    });
+    const originalHash = hashState(originalState);
+    const checkpoint = await recorder.checkpoint(run, {
+      state: originalState,
+      stateHash: originalHash,
+    });
+    const checkpointEvent = recorder
+      .getEvents(run)
+      .find((recorded) => recorded.type === 'checkpoint.created');
+
+    assert.notEqual(checkpoint.state_hash, originalHash);
+    assert.equal(hashState(checkpoint.state as typeof originalState), checkpoint.state_hash);
+    assert.equal(
+      (checkpointEvent?.payload as { state_hash?: string }).state_hash,
+      checkpoint.state_hash,
+    );
+    assert.equal(JSON.stringify(checkpoint).includes(secret), false);
+
+    await recorder.completeRun(run, { final_state_hash: checkpoint.state_hash });
+    await writer.commit(recorder.getManifest(run));
+    await writer.close();
+
+    const checkpointFile = join(root, 'checkpoints', '000001.json');
+    const checkpointContents = await readFile(checkpointFile, 'utf8');
+    const eventContents = await readFile(join(root, 'events.jsonl'), 'utf8');
+    const storedCheckpoint = JSON.parse(checkpointContents) as Checkpoint;
+    assert.equal(checkpointContents.includes(secret), false);
+    assert.equal(eventContents.includes(secret), false);
+    assert.deepEqual(storedCheckpoint, checkpoint);
+
+    const eventScan = await scanJsonlFile(join(root, 'events.jsonl'));
+    const store = await CheckpointStore.open(join(root, 'checkpoints'));
+    const restored = await reconstructState(eventScan.events as EventEnvelope<string, unknown>[], {
+      checkpointStore: store,
+    });
+    await store.close();
+
+    assert.deepEqual(restored.state, checkpoint.state);
+    assert.equal(restored.stateHash, checkpoint.state_hash);
+    assert.equal(restored.usedCheckpoint, true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('keeps checkpoint redaction consistent with redacted state-change events', async () => {
+  const redactionSources = new Set<string>();
+  const pipeline = new RedactionPipeline({
+    fieldRules: [
+      { path: '/state/api_key', category: 'api_key', strategy: 'mask' },
+      { path: '/state/nested/token', category: 'token', strategy: 'mask' },
+      { path: '/state/users/*/token', category: 'token', strategy: 'mask' },
+      { path: '/value/api_key', category: 'api_key', strategy: 'mask' },
+      { path: '/value/nested/token', category: 'token', strategy: 'mask' },
+      { path: '/value/users/*/token', category: 'token', strategy: 'mask' },
+    ],
+    customRedactors: [
+      {
+        path: '/state/profile/email',
+        category: 'personal_data',
+        redact: (_value, context) => {
+          redactionSources.add(context.source);
+          return { action: 'replace', value: '[email removed]' };
+        },
+      },
+      {
+        path: '/value/profile/email',
+        category: 'personal_data',
+        redact: (_value, context) => {
+          redactionSources.add(context.source);
+          return { action: 'replace', value: '[email removed]' };
+        },
+      },
+    ],
+  });
+  const recorder = new Recorder({ interceptors: [pipeline.asInterceptor()] });
+  const sourceState = {
+    api_key: 'sk-reviewsecret123456789',
+    nested: { token: 'nested-secret' },
+    users: [{ token: 'first-secret' }, { token: 'second-secret' }],
+    profile: { email: 'ada@example.com' },
+  };
+  const expectedState = {
+    state: {
+      api_key: '[REDACTED:api_key]',
+      nested: { token: '[REDACTED:token]' },
+      users: [{ token: '[REDACTED:token]' }, { token: '[REDACTED:token]' }],
+      profile: { email: '[email removed]' },
+    },
+  };
+
+  const run = await recorder.startRun({
+    runtime: { name: 'test-runtime', version: '0.1.0' },
+  });
+  await recorder.appendEvent(run.context(), {
+    type: 'state.changed',
+    payload: { operation: 'set', path: '/state', value: sourceState },
+  });
+  const checkpoint = await recorder.checkpoint(run, {
+    state: { state: sourceState },
+    stateHash: hashState({ state: sourceState }),
+  });
+  const fromEvents = await reconstructState(recorder.getEvents(run));
+  const checkpointEvent = recorder
+    .getEvents(run)
+    .find((recorded) => recorded.type === 'checkpoint.created');
+
+  assert.deepEqual(checkpoint.state, expectedState);
+  assert.deepEqual(fromEvents.state, expectedState);
+  assert.equal(checkpoint.state_hash, fromEvents.stateHash);
+  assert.equal(
+    (checkpointEvent?.payload as { state_hash?: string }).state_hash,
+    checkpoint.state_hash,
+  );
+  assert.deepEqual([...redactionSources].sort(), ['checkpoint', 'event']);
+});
+
+test('leaves artifact-backed checkpoint state at the artifact redaction boundary', async () => {
+  const pipeline = new RedactionPipeline({
+    customRedactors: [
+      {
+        category: 'remove-checkpoint-values',
+        redact: (_value, context) =>
+          context.source === 'checkpoint' ? { action: 'remove' } : { action: 'keep' },
+      },
+    ],
+  });
+  const recorder = new Recorder({ interceptors: [pipeline.asInterceptor()] });
+  const artifactState: ArtifactReference = {
+    schema_version: '0.1.0',
+    digest: 'a'.repeat(64),
+    media_type: 'application/json',
+    byte_length: 128,
+  };
+  const run = await recorder.startRun({
+    runtime: { name: 'test-runtime', version: '0.1.0' },
+  });
+  const checkpoint = await recorder.checkpoint(run, {
+    state: artifactState,
+    stateHash: 'b'.repeat(64),
+  });
+  const checkpointEvent = recorder
+    .getEvents(run)
+    .find((recorded) => recorded.type === 'checkpoint.created');
+
+  assert.deepEqual(checkpoint.state, artifactState);
+  assert.equal(checkpoint.state_hash, 'b'.repeat(64));
+  assert.equal((checkpointEvent?.payload as { state_hash?: string }).state_hash, 'b'.repeat(64));
 });

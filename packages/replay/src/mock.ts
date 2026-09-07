@@ -10,7 +10,7 @@ import type {
   SnapshotManifest,
 } from '@agent-loop-snapshot/schema';
 import { Recorder, reconstructState, type RunHandle } from '@agent-loop-snapshot/recorder';
-import type { TraceSnapshot } from '@agent-loop-snapshot/trace';
+import { ArtifactReadError, type TraceSnapshot } from '@agent-loop-snapshot/trace';
 
 import { ReplayAdapterRegistry, type ReplayOutcome } from './adapters.js';
 import {
@@ -47,6 +47,8 @@ type SourceReplayCall = MockReplayCall & {
 
 export type MockReplayDiagnosticCode =
   | 'SOURCE_TRACE_INVALID'
+  | 'SOURCE_ARTIFACT_INVALID'
+  | 'SOURCE_STATE_UNAVAILABLE'
   | 'RECORDED_ADAPTER_INVALID'
   | 'INVALID_SOURCE_CALL'
   | 'CALL_COUNT_MISMATCH'
@@ -461,7 +463,23 @@ export class MockReplayRunner {
       (left, right) => left.sequence - right.sequence,
     )) {
       if (sourceEvent.type === 'state.changed') {
-        const payload = await materializeStatePayload(this.source, sourceEvent.payload);
+        let payload: JsonObject | undefined;
+        try {
+          payload = await materializeStatePayload(this.source, sourceEvent.payload);
+        } catch (error) {
+          diagnostics.push({
+            severity: 'error',
+            code: 'SOURCE_ARTIFACT_INVALID',
+            message:
+              error instanceof ArtifactReadError
+                ? error.message
+                : error instanceof Error
+                  ? `Mock replay could not materialize a source state artifact: ${error.message}`
+                  : 'Mock replay could not materialize a source state artifact.',
+            sourceEventId: sourceEvent.event_id,
+          });
+          break;
+        }
         if (payload === undefined) {
           diagnostics.push({
             severity: 'error',
@@ -545,10 +563,36 @@ export class MockReplayRunner {
       return this.fail(run, diagnostics, sourceId);
     }
 
-    const sourceState = await reconstructState(this.source.events, {
-      checkpoints: this.source.checkpoints,
-      resolveArtifact: (reference) => resolveSourceArtifact(this.source, reference),
-    });
+    let sourceState;
+    try {
+      sourceState = await reconstructState(this.source.events, {
+        checkpoints: this.source.checkpoints,
+        resolveArtifact: (reference) => resolveSourceArtifact(this.source, reference),
+      });
+    } catch (error) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'SOURCE_ARTIFACT_INVALID',
+        message:
+          error instanceof ArtifactReadError
+            ? error.message
+            : error instanceof Error
+              ? `Mock replay could not reconstruct source state: ${error.message}`
+              : 'Mock replay could not reconstruct source state.',
+      });
+      return this.fail(run, diagnostics, sourceId);
+    }
+    const unavailableCheckpoint = sourceState.diagnostics.find(
+      (diagnostic) => diagnostic.code === 'CHECKPOINT_STATE_UNAVAILABLE',
+    );
+    if (unavailableCheckpoint !== undefined) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'SOURCE_STATE_UNAVAILABLE',
+        message: unavailableCheckpoint.message,
+      });
+      return this.fail(run, diagnostics, sourceId);
+    }
     const replayState = await reconstructState(this.recorder.getEvents(run));
     if (sourceState.stateHash !== replayState.stateHash) {
       diagnostics.push({

@@ -15,7 +15,7 @@ import {
   reconstructState,
   type RunHandle,
 } from '@agent-loop-snapshot/recorder';
-import type { TraceSnapshot } from '@agent-loop-snapshot/trace';
+import { ArtifactReadError, type TraceSnapshot } from '@agent-loop-snapshot/trace';
 
 import {
   ReplayAdapterRegistry,
@@ -99,6 +99,7 @@ export interface VerifiedReplayDifference {
 
 export type VerifiedReplayDiagnosticCode =
   | 'SOURCE_TRACE_INVALID'
+  | 'SOURCE_ARTIFACT_INVALID'
   | 'INVALID_SOURCE_CALL'
   | 'INVALID_SOURCE_RESPONSE'
   | 'MISSING_SOURCE_RESPONSE'
@@ -550,7 +551,7 @@ function failureForDiagnostics(diagnostics: readonly VerifiedReplayDiagnostic[])
 }
 
 async function checkpointState(source: TraceSnapshot, checkpoint: Checkpoint): Promise<JsonObject> {
-  if (isJsonObject(checkpoint.state)) {
+  if (!isArtifactReference(checkpoint.state) && isJsonObject(checkpoint.state)) {
     return cloneJson(checkpoint.state);
   }
   const bytes = await source.readArtifact(checkpoint.state.digest);
@@ -621,7 +622,13 @@ export class VerifiedReplayRunner {
       const diagnostics: VerifiedReplayDiagnostic[] = [
         {
           severity: 'error',
-          code: options.checkpointId === undefined ? 'CHECKPOINT_INVALID' : 'CHECKPOINT_NOT_FOUND',
+          code:
+            options.checkpointId !== undefined &&
+            this.source.checkpoints.some(
+              (checkpoint) => checkpoint.checkpoint_id === options.checkpointId,
+            )
+              ? 'CHECKPOINT_INVALID'
+              : 'CHECKPOINT_NOT_FOUND',
           message: error instanceof Error ? error.message : 'Could not select a replay checkpoint.',
         },
       ];
@@ -686,7 +693,23 @@ export class VerifiedReplayRunner {
         continue;
       }
       if (sourceEvent.type === 'state.changed') {
-        const payload = await materializeStatePayload(this.source, sourceEvent.payload);
+        let payload: JsonObject | undefined;
+        try {
+          payload = await materializeStatePayload(this.source, sourceEvent.payload);
+        } catch (error) {
+          diagnostics.push({
+            severity: 'error',
+            code: 'SOURCE_ARTIFACT_INVALID',
+            message:
+              error instanceof ArtifactReadError
+                ? error.message
+                : error instanceof Error
+                  ? `Verified replay could not materialize a source state artifact: ${error.message}`
+                  : 'Verified replay could not materialize a source state artifact.',
+            sourceEventId: sourceEvent.event_id,
+          });
+          break;
+        }
         if (payload === undefined) {
           diagnostics.push({
             severity: 'error',

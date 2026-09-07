@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { lstat, readFile, readdir } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,6 +15,12 @@ import {
   type WorkflowDocument,
   type WorkflowNodeId,
 } from './index.js';
+import {
+  SnapshotPathError,
+  createSnapshotPathBoundary,
+  inspectSnapshotPath,
+  type SnapshotPathBoundary,
+} from './snapshot-path.js';
 
 const snapshotSchemaVersion = '0.1.0';
 export const defaultSnapshotDirectoryValidationLimits = {
@@ -609,17 +615,22 @@ export function validateSnapshot(document: SnapshotDocument): ValidationResult {
 }
 
 async function readJsonFile(
+  boundary: SnapshotPathBoundary,
   filePath: string,
   source: DiagnosticSource,
   path: string,
   diagnostics: ValidationDiagnostic[],
 ): Promise<unknown> {
   try {
-    return JSON.parse(await readFile(filePath, 'utf8')) as unknown;
+    const trustedFile = await inspectSnapshotPath(boundary, filePath, 'file');
+    return JSON.parse(await readFile(trustedFile.path, 'utf8')) as unknown;
   } catch (error) {
     diagnostics.push({
       severity: 'error',
-      code: 'INVALID_JSON',
+      code:
+        error instanceof SnapshotPathError && error.code !== 'MISSING'
+          ? 'UNTRUSTED_SNAPSHOT_ENTRY'
+          : 'INVALID_JSON',
       path,
       message: error instanceof Error ? error.message : 'File is not valid JSON.',
       source,
@@ -630,6 +641,7 @@ async function readJsonFile(
 }
 
 async function readEventsFile(
+  boundary: SnapshotPathBoundary,
   filePath: string,
   diagnostics: ValidationDiagnostic[],
   maxBytes: number,
@@ -637,34 +649,26 @@ async function readEventsFile(
   let content: string;
 
   try {
-    const fileStats = await lstat(filePath);
-    if (!fileStats.isFile()) {
-      diagnostics.push({
-        severity: 'error',
-        code: 'UNTRUSTED_EVENTS_FILE',
-        path: '/events',
-        message: 'events.jsonl must be a regular file inside the snapshot directory.',
-        source: 'events',
-        file: basename(filePath),
-      });
-      return [];
-    }
-    if (fileStats.size > maxBytes) {
+    const trustedFile = await inspectSnapshotPath(boundary, filePath, 'file');
+    if (trustedFile.size > maxBytes) {
       diagnostics.push({
         severity: 'error',
         code: 'EVENT_FILE_TOO_LARGE',
         path: '/events',
-        message: `events.jsonl is ${String(fileStats.size)} bytes, exceeding the ${String(maxBytes)} byte limit.`,
+        message: `events.jsonl is ${String(trustedFile.size)} bytes, exceeding the ${String(maxBytes)} byte limit.`,
         source: 'events',
         file: basename(filePath),
       });
       return [];
     }
-    content = await readFile(filePath, 'utf8');
+    content = await readFile(trustedFile.path, 'utf8');
   } catch (error) {
     diagnostics.push({
       severity: 'error',
-      code: 'MISSING_EVENTS_FILE',
+      code:
+        error instanceof SnapshotPathError && error.code !== 'MISSING'
+          ? 'UNTRUSTED_EVENTS_FILE'
+          : 'MISSING_EVENTS_FILE',
       path: '/events',
       message: error instanceof Error ? error.message : 'events.jsonl could not be read.',
       source: 'events',
@@ -698,22 +702,35 @@ async function readEventsFile(
 }
 
 async function readCheckpoints(
+  boundary: SnapshotPathBoundary,
   checkpointDirectory: string,
   diagnostics: ValidationDiagnostic[],
 ): Promise<unknown[]> {
   let fileNames: string[];
 
   try {
-    fileNames = (await readdir(checkpointDirectory)).filter((fileName) =>
+    const trustedDirectory = await inspectSnapshotPath(boundary, checkpointDirectory, 'directory');
+    fileNames = (await readdir(trustedDirectory.path)).filter((fileName) =>
       fileName.endsWith('.json'),
     );
-  } catch {
+  } catch (error) {
+    if (error instanceof SnapshotPathError && error.code !== 'MISSING') {
+      diagnostics.push({
+        severity: 'error',
+        code: 'UNTRUSTED_CHECKPOINT_DIRECTORY',
+        path: '/checkpoints',
+        message: error.message,
+        source: 'checkpoints',
+        file: basename(checkpointDirectory),
+      });
+    }
     return [];
   }
 
   const checkpoints: unknown[] = [];
   for (const fileName of fileNames.sort()) {
     const checkpoint = await readJsonFile(
+      boundary,
       join(checkpointDirectory, fileName),
       'checkpoints',
       `/checkpoints/${checkpoints.length}`,
@@ -727,7 +744,7 @@ async function readCheckpoints(
 }
 
 async function validateArtifactFiles(
-  snapshotDirectory: string,
+  boundary: SnapshotPathBoundary,
   document: SnapshotDocument,
   diagnostics: ValidationDiagnostic[],
   maxArtifactBytes: number,
@@ -746,39 +763,30 @@ async function validateArtifactFiles(
       continue;
     }
 
-    const artifactPath = join(snapshotDirectory, 'artifacts', `sha256-${reference.digest}`);
+    const artifactPath = join(boundary.directory, 'artifacts', `sha256-${reference.digest}`);
     let contents: Buffer;
 
     try {
-      const fileStats = await lstat(artifactPath);
-      if (!fileStats.isFile()) {
-        diagnostics.push({
-          severity: 'error',
-          code: 'UNTRUSTED_ARTIFACT_ENTRY',
-          path,
-          message:
-            'Referenced artifact must be a regular file inside the snapshot artifact directory.',
-          source: 'integrity',
-          file: artifactPath,
-        });
-        continue;
-      }
-      if (fileStats.size > maxArtifactBytes) {
+      const trustedFile = await inspectSnapshotPath(boundary, artifactPath, 'file');
+      if (trustedFile.size > maxArtifactBytes) {
         diagnostics.push({
           severity: 'error',
           code: 'ARTIFACT_TOO_LARGE',
           path,
-          message: `Artifact is ${String(fileStats.size)} bytes, exceeding the ${String(maxArtifactBytes)} byte limit.`,
+          message: `Artifact is ${String(trustedFile.size)} bytes, exceeding the ${String(maxArtifactBytes)} byte limit.`,
           source: 'integrity',
           file: artifactPath,
         });
         continue;
       }
-      contents = await readFile(artifactPath);
+      contents = await readFile(trustedFile.path);
     } catch (error) {
       diagnostics.push({
         severity: 'error',
-        code: 'MISSING_ARTIFACT',
+        code:
+          error instanceof SnapshotPathError && error.code !== 'MISSING'
+            ? 'UNTRUSTED_ARTIFACT_ENTRY'
+            : 'MISSING_ARTIFACT',
         path,
         message: error instanceof Error ? error.message : 'Referenced artifact is missing.',
         source: 'integrity',
@@ -824,7 +832,8 @@ export async function validateSnapshotDirectory(
   snapshotDirectory: string,
   options: SnapshotDirectoryValidationOptions = {},
 ): Promise<ValidationResult> {
-  const root = resolve(snapshotDirectory);
+  const boundary = await createSnapshotPathBoundary(snapshotDirectory);
+  const root = boundary.directory;
   const maxEventFileBytes = limit(
     options.maxEventFileBytes,
     defaultSnapshotDirectoryValidationLimits.maxEventFileBytes,
@@ -837,18 +846,24 @@ export async function validateSnapshotDirectory(
   );
   const diagnostics: ValidationDiagnostic[] = [];
   const manifest = await readJsonFile(
+    boundary,
     join(root, 'manifest.json'),
     'manifest',
     '/manifest',
     diagnostics,
   );
-  const events = await readEventsFile(join(root, 'events.jsonl'), diagnostics, maxEventFileBytes);
-  const checkpoints = await readCheckpoints(join(root, 'checkpoints'), diagnostics);
+  const events = await readEventsFile(
+    boundary,
+    join(root, 'events.jsonl'),
+    diagnostics,
+    maxEventFileBytes,
+  );
+  const checkpoints = await readCheckpoints(boundary, join(root, 'checkpoints'), diagnostics);
   const document: SnapshotDocument = { manifest, events, checkpoints };
   const result = validateSnapshot(document);
 
   diagnostics.push(...result.diagnostics);
-  await validateArtifactFiles(root, document, diagnostics, maxArtifactBytes);
+  await validateArtifactFiles(boundary, document, diagnostics, maxArtifactBytes);
 
   return {
     valid: diagnostics.every((diagnostic) => diagnostic.severity !== 'error'),

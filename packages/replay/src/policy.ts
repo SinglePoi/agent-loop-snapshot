@@ -64,6 +64,8 @@ export interface ReplayPolicyOptions {
 export interface ReplayPolicyEvaluationOptions {
   /** A newly supplied approval for this action, never one read from a trace. */
   readonly approval?: ReplayPolicyApproval;
+  /** A workflow may require approval even when the default policy permits the action. */
+  readonly requiresApproval?: boolean;
 }
 
 export class ReplayPolicyError extends Error {
@@ -160,7 +162,7 @@ export class ReplayPolicyEngine {
         ? defaultReason(action, configuredDecision)
         : `Rule ${String(ruleIndex)} selected ${configuredDecision} for this current replay action.`;
 
-    if (configuredDecision !== 'require_approval') {
+    if (configuredDecision === 'deny' || configuredDecision === 'dry_run') {
       return {
         action,
         decision: configuredDecision,
@@ -169,20 +171,38 @@ export class ReplayPolicyEngine {
       };
     }
 
-    const approval = options.approval;
-    if (approval !== undefined && approval.actionId === action.id) {
+    const requiresApproval = configuredDecision === 'require_approval' || options.requiresApproval;
+    if (!requiresApproval) {
       return {
         action,
         decision: 'allow',
-        reason: `Rule ${String(ruleIndex)} required approval; a matching current approval was supplied.`,
-        ruleIndex,
+        reason,
+        ...(ruleIndex === -1 ? {} : { ruleIndex }),
+      };
+    }
+
+    const approval = options.approval;
+    if (approval !== undefined && approval.actionId === action.id) {
+      const approvalReason =
+        configuredDecision === 'require_approval'
+          ? `Rule ${String(ruleIndex)} required approval`
+          : 'The workflow declared this action requires approval';
+      return {
+        action,
+        decision: 'allow',
+        reason: `${approvalReason}; a matching current approval was supplied.`,
+        ...(ruleIndex === -1 ? {} : { ruleIndex }),
         approval,
       };
     }
+    const approvalReason =
+      configuredDecision === 'require_approval'
+        ? reason
+        : 'The workflow declared this action requires approval.';
     return {
       action,
       decision: 'require_approval',
-      reason: `${reason} A matching approval for this action has not been supplied.`,
+      reason: `${approvalReason} A matching approval for this action has not been supplied.`,
       ...(ruleIndex === -1 ? {} : { ruleIndex }),
     };
   }

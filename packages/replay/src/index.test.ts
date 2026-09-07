@@ -1,11 +1,20 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import test from 'node:test';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { loadTraceSnapshot } from '@agent-loop-snapshot/trace';
-import { Recorder } from '@agent-loop-snapshot/recorder';
-import type { WorkflowDocument } from '@agent-loop-snapshot/schema';
+import { ArtifactReadError, loadTraceSnapshot } from '@agent-loop-snapshot/trace';
+import {
+  SnapshotWriter,
+  createDefaultRedactionPipeline,
+  hashState,
+  Recorder,
+  reconstructState,
+  type RunHandle,
+} from '@agent-loop-snapshot/recorder';
+import { validateWorkflow, type EventId, type WorkflowDocument } from '@agent-loop-snapshot/schema';
 
 import {
   MockReplayRunner,
@@ -32,6 +41,139 @@ async function loadExampleTrace() {
   const trace = await loadTraceSnapshot(fixture);
   assert.equal(trace.valid, true, JSON.stringify(trace.diagnostics));
   return trace;
+}
+
+interface RecordedTraceFixture {
+  readonly directory: string;
+  readonly trace: Awaited<ReturnType<typeof loadTraceSnapshot>>;
+}
+
+async function createRecordedTrace(
+  build: (recorder: Recorder, run: RunHandle) => Promise<void>,
+): Promise<RecordedTraceFixture> {
+  const directory = await mkdtemp(join(process.env.TEMP ?? process.cwd(), 'alsnap-compiler-'));
+  const recorder = new Recorder();
+  const run = await recorder.startRun({
+    runtime: { name: 'compiler-test-runtime', version: '0.1.0' },
+    input: {},
+  });
+  await build(recorder, run);
+  await recorder.completeRun(run, { final_state_hash: hashState({}), output: {} });
+  await writeFile(
+    join(directory, 'events.jsonl'),
+    `${recorder
+      .getEvents(run)
+      .map((event) => JSON.stringify(event))
+      .join('\n')}\n`,
+  );
+  await writeFile(
+    join(directory, 'manifest.json'),
+    `${JSON.stringify(recorder.getManifest(run), null, 2)}\n`,
+  );
+  const trace = await loadTraceSnapshot(directory);
+  assert.equal(trace.valid, true, JSON.stringify(trace.diagnostics));
+  return { directory, trace };
+}
+
+function toolRequest(
+  recorder: Recorder,
+  run: RunHandle,
+  parentIds: readonly EventId[],
+  correlationKey: string,
+  tool: string,
+) {
+  return recorder.appendEvent(run.context(parentIds), {
+    type: 'tool.requested',
+    payload: { correlation_key: correlationKey, tool, arguments: {} },
+  });
+}
+
+function toolCompleted(
+  recorder: Recorder,
+  run: RunHandle,
+  parentId: EventId,
+  correlationKey: string,
+) {
+  return recorder.appendEvent(run.context([parentId]), {
+    type: 'tool.completed',
+    payload: { correlation_key: correlationKey, output: {} },
+  });
+}
+
+interface TamperableArtifactTrace {
+  readonly directory: string;
+  readonly stateArtifactPath: string;
+  readonly checkpointArtifactPath: string;
+  readonly checkpointId: string;
+}
+
+function artifactReference(bytes: Uint8Array) {
+  return {
+    schema_version: '0.1.0',
+    digest: createHash('sha256').update(bytes).digest('hex'),
+    media_type: 'application/json',
+    byte_length: bytes.byteLength,
+  };
+}
+
+async function createTamperableArtifactTrace(): Promise<TamperableArtifactTrace> {
+  const directory = await mkdtemp(
+    join(process.env.TEMP ?? process.cwd(), 'alsnap-replay-artifact-'),
+  );
+  const fixture = resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    '../../schema/fixtures/minimal-success',
+  );
+  const stateBytes = Buffer.from(
+    JSON.stringify({ operation: 'set', path: '/answer', value: 'good' }),
+    'utf8',
+  );
+  const checkpointBytes = Buffer.from(JSON.stringify({ answer: 'good' }), 'utf8');
+  const stateReference = artifactReference(stateBytes);
+  const checkpointReference = artifactReference(checkpointBytes);
+  const events = (await readFile(join(fixture, 'events.jsonl'), 'utf8'))
+    .trim()
+    .split(/\r?\n/)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  const stateEvent = events[1];
+  const completedEvent = events[2];
+  assert.ok(stateEvent && completedEvent);
+  stateEvent.payload = stateReference;
+  completedEvent.payload = {
+    ...(completedEvent.payload as Record<string, unknown>),
+    final_state_hash: hashState({ answer: 'good' }),
+  };
+
+  const checkpointId = 'cp_00000000-0000-4000-8000-000000000005';
+  await mkdir(join(directory, 'artifacts'), { recursive: true });
+  await mkdir(join(directory, 'checkpoints'), { recursive: true });
+  await writeFile(join(directory, 'manifest.json'), await readFile(join(fixture, 'manifest.json')));
+  await writeFile(
+    join(directory, 'events.jsonl'),
+    `${events.map((event) => JSON.stringify(event)).join('\n')}\n`,
+  );
+  const stateArtifactPath = join(directory, 'artifacts', `sha256-${stateReference.digest}`);
+  const checkpointArtifactPath = join(
+    directory,
+    'artifacts',
+    `sha256-${checkpointReference.digest}`,
+  );
+  await writeFile(stateArtifactPath, stateBytes);
+  await writeFile(checkpointArtifactPath, checkpointBytes);
+  await writeFile(
+    join(directory, 'checkpoints', '000002.json'),
+    JSON.stringify({
+      schema_version: '0.1.0',
+      checkpoint_id: checkpointId,
+      run_id: 'run_00000000-0000-4000-8000-000000000001',
+      created_at: '2026-09-06T02:00:00.750Z',
+      last_event_id: 'evt_00000000-0000-4000-8000-000000000002',
+      sequence: 2,
+      state_hash: hashState({ answer: 'good' }),
+      state: checkpointReference,
+    }),
+  );
+  return { directory, stateArtifactPath, checkpointArtifactPath, checkpointId };
 }
 
 test('creates deterministic correlation keys and keeps retries on the same logical call', () => {
@@ -186,6 +328,220 @@ test('compiles the example Trace into a stable editable Workflow IR with provena
   });
 });
 
+test('retains call dependencies across multiple unmapped intermediate events', async () => {
+  const fixture = await createRecordedTrace(async (recorder, run) => {
+    const firstRequest = await toolRequest(
+      recorder,
+      run,
+      [run.startedEvent.event_id],
+      'tool:first',
+      'first',
+    );
+    const firstCompleted = await toolCompleted(recorder, run, firstRequest.event_id, 'tool:first');
+    const stateChanged = await recorder.appendEvent(run.context([firstCompleted.event_id]), {
+      type: 'state.changed',
+      payload: { operation: 'set', path: '/first_complete', value: true },
+    });
+    const decision = await recorder.appendEvent(run.context([stateChanged.event_id]), {
+      type: 'decision.recorded',
+      payload: {
+        decision: 'continue',
+        basis_summary: 'The first call completed.',
+        success_conditions: ['continue to the second call'],
+      },
+    });
+    const secondRequest = await toolRequest(
+      recorder,
+      run,
+      [decision.event_id],
+      'tool:second',
+      'second',
+    );
+    await toolCompleted(recorder, run, secondRequest.event_id, 'tool:second');
+  });
+  try {
+    const result = compileTraceToWorkflow(fixture.trace);
+    assert.deepEqual(result.diagnostics, []);
+    assert.ok(result.workflow);
+    assert.deepEqual(
+      result.workflow.nodes.map((node) => node.depends_on),
+      [[], [{ node_id: 'node_tool_1', on: 'success' }]],
+    );
+    assert.equal(validateWorkflow(result.workflow).valid, true);
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test('retains joins through intermediates without serializing parallel branches or retry attempts', async () => {
+  let retryFailedEventId: EventId | undefined;
+  const fixture = await createRecordedTrace(async (recorder, run) => {
+    const firstRequest = await toolRequest(
+      recorder,
+      run,
+      [run.startedEvent.event_id],
+      'tool:first',
+      'first',
+    );
+    const secondRequest = await toolRequest(
+      recorder,
+      run,
+      [run.startedEvent.event_id],
+      'tool:second',
+      'second',
+    );
+    const firstCompleted = await toolCompleted(recorder, run, firstRequest.event_id, 'tool:first');
+    const secondCompleted = await toolCompleted(
+      recorder,
+      run,
+      secondRequest.event_id,
+      'tool:second',
+    );
+    const joined = await recorder.appendEvent(
+      run.context([firstCompleted.event_id, secondCompleted.event_id]),
+      {
+        type: 'state.changed',
+        payload: { operation: 'set', path: '/joined', value: true },
+      },
+    );
+    const decision = await recorder.appendEvent(run.context([joined.event_id]), {
+      type: 'decision.recorded',
+      payload: {
+        decision: 'retry',
+        basis_summary: 'Both parallel calls completed.',
+        success_conditions: ['retryable call runs after the join'],
+      },
+    });
+    const retryRequest = await toolRequest(
+      recorder,
+      run,
+      [decision.event_id],
+      'tool:retry',
+      'retryable',
+    );
+    const retryFailed = await recorder.appendEvent(run.context([retryRequest.event_id]), {
+      type: 'tool.failed',
+      payload: {
+        correlation_key: 'tool:retry',
+        attempt: 1,
+        error: {
+          code: 'TRANSIENT',
+          message: 'Retry once.',
+          retryable: true,
+          kind: 'tool',
+        },
+      },
+    });
+    retryFailedEventId = retryFailed.event_id;
+    const retryDecision = await recorder.appendEvent(run.context([retryFailed.event_id]), {
+      type: 'decision.recorded',
+      payload: {
+        decision: 'retry',
+        basis_summary: 'The retryable call failed transiently.',
+        success_conditions: ['retry the same correlation key'],
+      },
+    });
+    const retryRequestAgain = await toolRequest(
+      recorder,
+      run,
+      [retryDecision.event_id],
+      'tool:retry',
+      'retryable',
+    );
+    const retryCompleted = await toolCompleted(
+      recorder,
+      run,
+      retryRequestAgain.event_id,
+      'tool:retry',
+    );
+    const afterRetry = await recorder.appendEvent(run.context([retryCompleted.event_id]), {
+      type: 'state.changed',
+      payload: { operation: 'set', path: '/retried', value: true },
+    });
+    const followupRequest = await toolRequest(
+      recorder,
+      run,
+      [afterRetry.event_id],
+      'tool:followup',
+      'followup',
+    );
+    await toolCompleted(recorder, run, followupRequest.event_id, 'tool:followup');
+  });
+  try {
+    const result = compileTraceToWorkflow(fixture.trace);
+    assert.deepEqual(result.diagnostics, []);
+    assert.ok(result.workflow);
+    assert.deepEqual(
+      result.workflow.nodes.map((node) => node.depends_on),
+      [
+        [],
+        [],
+        [
+          { node_id: 'node_tool_1', on: 'success' },
+          { node_id: 'node_tool_2', on: 'success' },
+        ],
+        [{ node_id: 'node_tool_3', on: 'success' }],
+      ],
+    );
+    assert.deepEqual(result.workflow.nodes[2]?.retry, {
+      max_attempts: 2,
+      retry_on: ['TRANSIENT'],
+    });
+    assert.ok(retryFailedEventId);
+    assert.deepEqual(result.report.removedFailureSteps, [
+      {
+        kind: 'tool',
+        correlationKey: 'tool:retry',
+        eventIds: [retryFailedEventId],
+        errorCodes: ['TRANSIENT'],
+        reason: 'retry_merged',
+      },
+    ]);
+    assert.equal(validateWorkflow(result.workflow).valid, true);
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test('compiles an 8,000-event unmapped ancestor chain without exhausting the call stack', async () => {
+  const fixture = await createRecordedTrace(async (recorder, run) => {
+    const firstRequest = await toolRequest(
+      recorder,
+      run,
+      [run.startedEvent.event_id],
+      'tool:first',
+      'first',
+    );
+    const firstCompleted = await toolCompleted(recorder, run, firstRequest.event_id, 'tool:first');
+    let parentId = firstCompleted.event_id;
+    for (let index = 0; index < 8_000; index += 1) {
+      const decision = await recorder.appendEvent(run.context([parentId]), {
+        type: 'decision.recorded',
+        payload: {
+          decision: 'continue',
+          basis_summary: 'review',
+          success_conditions: ['continue'],
+        },
+      });
+      parentId = decision.event_id;
+    }
+    const secondRequest = await toolRequest(recorder, run, [parentId], 'tool:second', 'second');
+    await toolCompleted(recorder, run, secondRequest.event_id, 'tool:second');
+  });
+  try {
+    const result = compileTraceToWorkflow(fixture.trace);
+    assert.deepEqual(result.diagnostics, []);
+    assert.ok(result.workflow);
+    assert.deepEqual(
+      result.workflow.nodes.map((node) => node.depends_on),
+      [[], [{ node_id: 'node_tool_1', on: 'success' }]],
+    );
+    assert.equal(validateWorkflow(result.workflow).valid, true);
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
 test('does not copy source values, arguments, decisions, or approvals into compiled Workflow IR', async () => {
   const trace = await loadExampleTrace();
   const result = compileTraceToWorkflow(trace);
@@ -233,6 +589,41 @@ function semanticWorkflow(): WorkflowDocument {
       },
     ],
     outputs: { answer: { from: { node_id: 'node_verify' }, schema: { type: 'string' } } },
+  };
+}
+
+function approvalWorkflow(kind: 'agent_task' | 'human_approval'): WorkflowDocument {
+  return {
+    schema_version: '0.1.0',
+    workflow_type: 'agent-workflow',
+    workflow_id: 'wf_semantic_approval',
+    name: 'Approval fixture',
+    inputs: {},
+    nodes: [
+      kind === 'human_approval'
+        ? {
+            node_id: 'node_approval',
+            kind: 'human_approval',
+            approval_id: 'approve-read',
+            prompt: 'Approve this read-only action?',
+            depends_on: [],
+            on_failure: 'stop',
+            permissions: { side_effect: 'read_only', requires_approval: true },
+            success_conditions: [{ kind: 'output_schema', schema: { type: 'string' } }],
+          }
+        : {
+            node_id: 'node_approval',
+            kind: 'agent_task',
+            goal: 'Perform an explicitly approved read-only action.',
+            depends_on: [],
+            on_failure: 'stop',
+            permissions: { side_effect: 'read_only', requires_approval: true },
+            success_conditions: [{ kind: 'output_schema', schema: { type: 'string' } }],
+          },
+    ],
+    outputs: {
+      approved: { from: { node_id: 'node_approval' }, schema: { type: 'string' } },
+    },
   };
 }
 
@@ -309,6 +700,168 @@ test('semantic replay blocks an external-write node before the Agent can execute
   assert.equal(result.run.status, 'failed');
   assert.equal(result.report.result, 'not_equivalent');
   assert.equal(result.nodeResults[0]?.status, 'failed');
+});
+
+test('requires a matching current approval for read-only human-approval nodes', async () => {
+  const workflow = approvalWorkflow('human_approval');
+  let invocations = 0;
+  const agent = {
+    descriptor: {
+      name: 'approval-test-agent',
+      version: 'test',
+      capabilities: ['agent.execute'] as const,
+      sideEffect: 'read_only' as const,
+    },
+    async execute() {
+      invocations += 1;
+      return { status: 'completed' as const, output: 'approved action completed' };
+    },
+  };
+
+  const noApprovalRecorder = new Recorder();
+  const noApproval = await new SemanticReplayRunner({
+    workflow,
+    recorder: noApprovalRecorder,
+    agent,
+  }).run({ inputs: {} });
+  assert.equal(invocations, 0);
+  assert.equal(noApproval.run.status, 'failed');
+  assert.equal(noApproval.nodeResults[0]?.status, 'failed');
+  assert.ok(noApproval.diagnostics.some((diagnostic) => diagnostic.code === 'POLICY_BLOCKED'));
+  const noApprovalAudit = noApprovalRecorder
+    .getEvents(noApproval.run)
+    .find((event) => event.type === 'decision.recorded');
+  assert.deepEqual(noApprovalAudit?.payload, {
+    decision: 'policy.require_approval',
+    basis_summary:
+      'The workflow declared this action requires approval. A matching approval for this action has not been supplied.',
+    success_conditions: ['policy decision recorded before adapter execution'],
+    policy: {
+      action_id:
+        'replay-policy/v1/live/agent/read_only/node_approval/semantic%2Fwf_semantic_approval%2Fnode_approval/1',
+      mode: 'live',
+      adapter_kind: 'agent',
+      target: 'node_approval',
+      side_effect: 'read_only',
+      correlation_key: 'semantic/wf_semantic_approval/node_approval',
+      attempt: 1,
+      approved: false,
+    },
+  });
+
+  const mismatchedApproval = await new SemanticReplayRunner({
+    workflow,
+    recorder: new Recorder(),
+    agent,
+  }).run({
+    inputs: {},
+    approvalForAction: () => ({
+      actionId: 'replay-policy/v1/historical-approval',
+      approvedBy: 'source trace',
+      approvedAt: '2026-09-07T00:00:00.000Z',
+    }),
+  });
+  assert.equal(invocations, 0);
+  assert.equal(mismatchedApproval.run.status, 'failed');
+  assert.ok(
+    mismatchedApproval.diagnostics.some((diagnostic) => diagnostic.code === 'POLICY_BLOCKED'),
+  );
+
+  let policyRecorded = false;
+  let policyRecordedBeforeExecution = false;
+  const approvedRecorder = new Recorder({
+    interceptors: [
+      {
+        afterAppend: (event) => {
+          if (
+            event.type === 'decision.recorded' &&
+            (event.payload as { decision?: string }).decision === 'policy.allow'
+          ) {
+            policyRecorded = true;
+          }
+        },
+      },
+    ],
+  });
+  const approved = await new SemanticReplayRunner({
+    workflow,
+    recorder: approvedRecorder,
+    agent: {
+      ...agent,
+      async execute() {
+        policyRecordedBeforeExecution = policyRecorded;
+        invocations += 1;
+        return { status: 'completed' as const, output: 'approved action completed' };
+      },
+    },
+  }).run({
+    inputs: {},
+    approvalForAction: (action) => ({
+      actionId: action.id,
+      approvedBy: 'current user',
+      approvedAt: '2026-09-07T00:00:00.000Z',
+    }),
+  });
+  assert.equal(invocations, 1);
+  assert.equal(policyRecordedBeforeExecution, true);
+  assert.equal(approved.run.status, 'completed');
+  assert.deepEqual(approved.outputs, { approved: 'approved action completed' });
+});
+
+test('requires approval for other nodes and never lets approval override a policy deny', async () => {
+  const workflow = approvalWorkflow('agent_task');
+  let defaultInvocations = 0;
+  const noApproval = await new SemanticReplayRunner({
+    workflow,
+    recorder: new Recorder(),
+    agent: {
+      descriptor: {
+        name: 'approval-test-agent',
+        version: 'test',
+        capabilities: ['agent.execute'] as const,
+        sideEffect: 'read_only' as const,
+      },
+      async execute() {
+        defaultInvocations += 1;
+        return { status: 'completed' as const, output: 'should not run' };
+      },
+    },
+  }).run({ inputs: {} });
+  assert.equal(defaultInvocations, 0);
+  assert.equal(noApproval.run.status, 'failed');
+
+  let deniedInvocations = 0;
+  const deniedRecorder = new Recorder();
+  const denied = await new SemanticReplayRunner({
+    workflow,
+    recorder: deniedRecorder,
+    agent: {
+      descriptor: {
+        name: 'approval-test-agent',
+        version: 'test',
+        capabilities: ['agent.execute'] as const,
+        sideEffect: 'read_only' as const,
+      },
+      async execute() {
+        deniedInvocations += 1;
+        return { status: 'completed' as const, output: 'should not run' };
+      },
+    },
+    policy: { rules: [{ decision: 'deny', target: 'node_approval' }] },
+  }).run({
+    inputs: {},
+    approvalForAction: (action) => ({
+      actionId: action.id,
+      approvedBy: 'current user',
+      approvedAt: '2026-09-07T00:00:00.000Z',
+    }),
+  });
+  assert.equal(deniedInvocations, 0);
+  assert.equal(denied.run.status, 'failed');
+  const deniedAudit = deniedRecorder
+    .getEvents(denied.run)
+    .find((event) => event.type === 'decision.recorded');
+  assert.equal((deniedAudit?.payload as { decision?: string }).decision, 'policy.deny');
 });
 
 test('runs one Workflow IR on two Semantic runtimes and reports capability degradation before execution', async () => {
@@ -566,6 +1119,81 @@ test('mock replay reproduces the fixture state in a new audited replay trace', a
   assert.equal(events.at(-1)?.type, 'run.completed');
 });
 
+test('default reference redaction keeps event, checkpoint, and mock replay state consistent', async () => {
+  const directory = await mkdtemp(
+    join(process.env.TEMP ?? process.cwd(), 'alsnap-default-redaction-'),
+  );
+  const writer = await SnapshotWriter.open(directory, { flushMode: 'event' });
+  const pipeline = createDefaultRedactionPipeline();
+  const recorder = new Recorder({
+    interceptors: [pipeline.asInterceptor(), writer.asInterceptor()],
+  });
+  const secret = 'sk-reviewsecret123456789';
+  const originalState = { value: secret, api_key: secret };
+
+  try {
+    const run = await recorder.startRun({
+      runtime: { name: 'redaction-test-runtime', version: '0.1.0' },
+      input: {},
+    });
+    await recorder.appendEvent(run.context(), {
+      type: 'state.changed',
+      payload: { operation: 'set', path: '/value', value: secret },
+    });
+    await recorder.appendEvent(run.context(), {
+      type: 'state.changed',
+      payload: { operation: 'set', path: '/api_key', value: secret },
+    });
+    const firstCheckpoint = await recorder.checkpoint(run, {
+      state: originalState,
+      stateHash: hashState(originalState),
+    });
+    const secondCheckpoint = await recorder.checkpoint(run, {
+      state: originalState,
+      stateHash: hashState(originalState),
+    });
+    const thirdCheckpoint = await recorder.checkpoint(run, {
+      state: secondCheckpoint.state,
+      stateHash: hashState(secondCheckpoint.state as typeof originalState),
+    });
+    assert.deepEqual(firstCheckpoint.state, secondCheckpoint.state);
+    assert.deepEqual(secondCheckpoint.state, thirdCheckpoint.state);
+    assert.equal(firstCheckpoint.state_hash, secondCheckpoint.state_hash);
+    assert.equal(secondCheckpoint.state_hash, thirdCheckpoint.state_hash);
+
+    await recorder.completeRun(run, {
+      final_state_hash: thirdCheckpoint.state_hash,
+      output: {},
+    });
+    await writer.commit(recorder.getManifest(run));
+    await writer.close();
+
+    const eventFile = await readFile(join(directory, 'events.jsonl'), 'utf8');
+    const checkpointFile = await readFile(join(directory, 'checkpoints', '000003.json'), 'utf8');
+    assert.equal(eventFile.includes(secret), false);
+    assert.equal(checkpointFile.includes(secret), false);
+
+    const source = await loadTraceSnapshot(directory);
+    assert.equal(source.valid, true, JSON.stringify(source.diagnostics));
+    const fromEvents = await reconstructState(source.events);
+    const fromCheckpoint = await reconstructState(source.events, {
+      checkpoints: source.checkpoints,
+    });
+    assert.deepEqual(fromCheckpoint.state, fromEvents.state);
+    assert.equal(fromCheckpoint.stateHash, fromEvents.stateHash);
+    assert.equal(fromCheckpoint.usedCheckpoint, true);
+
+    const replay = await new MockReplayRunner({ source, recorder: new Recorder() }).run();
+    assert.equal(replay.run.status, 'completed');
+    assert.deepEqual(replay.diagnostics, []);
+    assert.deepEqual(replay.finalState, fromEvents.state);
+    assert.equal(replay.finalStateHash, fromEvents.stateHash);
+  } finally {
+    await writer.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('mock replay returns structured diffs before any recorded adapter is invoked', async () => {
   const fixture = resolve(
     dirname(fileURLToPath(import.meta.url)),
@@ -591,6 +1219,36 @@ test('mock replay returns structured diffs before any recorded adapter is invoke
   const events = recorder.getEvents(result.run);
   assert.equal(events.filter((event) => event.type === 'decision.recorded').length, 0);
   assert.equal(events.at(-1)?.type, 'run.failed');
+});
+
+test('mock and verified replay reject a tampered artifact-backed state change', async () => {
+  const fixture = await createTamperableArtifactTrace();
+  try {
+    const source = await loadTraceSnapshot(fixture.directory);
+    assert.equal(source.valid, true, JSON.stringify(source.diagnostics));
+    await writeFile(
+      fixture.stateArtifactPath,
+      JSON.stringify({ operation: 'set', path: '/answer', value: 'evil' }),
+    );
+
+    const mock = await new MockReplayRunner({ source, recorder: new Recorder() }).run();
+    assert.equal(mock.run.status, 'failed');
+    assert.ok(mock.diagnostics.some((diagnostic) => diagnostic.code === 'SOURCE_ARTIFACT_INVALID'));
+    assert.equal('finalState' in mock, false);
+
+    const verified = await new VerifiedReplayRunner({
+      source,
+      recorder: new Recorder(),
+      adapters: new ReplayAdapterRegistry(),
+    }).run();
+    assert.equal(verified.run.status, 'failed');
+    assert.ok(
+      verified.diagnostics.some((diagnostic) => diagnostic.code === 'SOURCE_ARTIFACT_INVALID'),
+    );
+    assert.equal('recordedState' in verified, false);
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
 });
 
 function createVerifiedAdapters(modelOutput = 'example answer'): ReplayAdapterRegistry {
@@ -716,6 +1374,32 @@ test('verified replay supports checkpoint selection and declarative output verif
     ),
     [],
   );
+});
+
+test('checkpoint restoration and verified replay reject tampered checkpoint artifacts', async () => {
+  const fixture = await createTamperableArtifactTrace();
+  try {
+    const source = await loadTraceSnapshot(fixture.directory);
+    assert.equal(source.valid, true, JSON.stringify(source.diagnostics));
+    await writeFile(fixture.checkpointArtifactPath, JSON.stringify({ answer: 'evil' }));
+
+    await assert.rejects(
+      selectReplayResumePoint(source, fixture.checkpointId),
+      (error: unknown) =>
+        error instanceof ArtifactReadError && error.code === 'ARTIFACT_DIGEST_MISMATCH',
+    );
+
+    const result = await new VerifiedReplayRunner({
+      source,
+      recorder: new Recorder(),
+      adapters: new ReplayAdapterRegistry(),
+    }).run({ checkpointId: fixture.checkpointId });
+    assert.equal(result.run.status, 'failed');
+    assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === 'CHECKPOINT_INVALID'));
+    assert.ok(result.diagnostics.some((diagnostic) => /SHA-256/u.test(diagnostic.message)));
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
 });
 
 test('verified replay reports output and custom assertion differences without blocking read-only calls', async () => {

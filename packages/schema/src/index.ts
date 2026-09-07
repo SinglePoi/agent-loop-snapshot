@@ -309,3 +309,4 @@ export interface WorkflowDocument {
 
 export * from './validator.js';
 export * from './migration.js';
+export * from './snapshot-path.js';

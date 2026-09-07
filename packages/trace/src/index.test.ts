@@ -1,14 +1,61 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
-import { loadTraceSnapshot } from './index.js';
+import { validateSnapshotDirectory } from '@agent-loop-snapshot/schema';
+
+import { ArtifactReadError, loadTraceSnapshot } from './index.js';
 
 const packageDirectory = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const schemaFixtures = resolve(packageDirectory, '../schema/fixtures');
 const exampleFixture = resolve(packageDirectory, '../example-runtime/fixtures/example-run');
+
+interface ArtifactSnapshotFixture {
+  readonly source: string;
+  readonly external: string;
+  readonly digest: string;
+  readonly artifactPath: string;
+}
+
+async function createArtifactSnapshot(root: string): Promise<ArtifactSnapshotFixture> {
+  const source = join(root, 'source');
+  const external = join(root, 'external');
+  const contents = Buffer.from('good', 'utf8');
+  const digest = createHash('sha256').update(contents).digest('hex');
+  const events = (await readFile(join(schemaFixtures, 'minimal-success', 'events.jsonl'), 'utf8'))
+    .trim()
+    .split(/\r?\n/)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  const firstEvent = events[0];
+  assert.ok(firstEvent);
+  firstEvent.payload = {
+    ...(firstEvent.payload as Record<string, unknown>),
+    input: {
+      schema_version: '0.1.0',
+      digest,
+      media_type: 'application/octet-stream',
+      byte_length: contents.byteLength,
+    },
+  };
+
+  const artifactPath = join(source, 'artifacts', `sha256-${digest}`);
+  await mkdir(join(source, 'artifacts'), { recursive: true });
+  await mkdir(external, { recursive: true });
+  await writeFile(
+    join(source, 'manifest.json'),
+    await readFile(join(schemaFixtures, 'minimal-success', 'manifest.json')),
+  );
+  await writeFile(
+    join(source, 'events.jsonl'),
+    `${events.map((event) => JSON.stringify(event)).join('\n')}\n`,
+  );
+  await writeFile(artifactPath, contents);
+
+  return { source, external, digest, artifactPath };
+}
 
 test('loads a complete snapshot and builds query indexes', async () => {
   const snapshot = await loadTraceSnapshot(exampleFixture);
@@ -63,7 +110,11 @@ test('loads artifact metadata and reports a mismatched artifact size', async () 
   assert.ok(
     snapshot.diagnostics.some((diagnostic) => diagnostic.code === 'ARTIFACT_SIZE_MISMATCH'),
   );
-  assert.equal((await snapshot.readArtifact(digest)).byteLength, metadata.actual_byte_length);
+  await assert.rejects(
+    snapshot.readArtifact(digest),
+    (error: unknown) =>
+      error instanceof ArtifactReadError && error.code === 'ARTIFACT_SIZE_MISMATCH',
+  );
 });
 
 test('limits untrusted event and artifact reads', async () => {
@@ -83,6 +134,178 @@ test('limits untrusted event and artifact reads', async () => {
     artifactLimited.diagnostics.some((diagnostic) => diagnostic.code === 'ARTIFACT_TOO_LARGE'),
   );
   await assert.rejects(artifactLimited.readArtifact(digest), /exceeds the configured read limit/);
+});
+
+test('verifies artifact byte length and digest at every lazy materialization', async () => {
+  const root = await mkdtemp(join(process.env.TEMP ?? process.cwd(), 'alsnap-artifact-integrity-'));
+  try {
+    const fixture = await createArtifactSnapshot(root);
+    const snapshot = await loadTraceSnapshot(fixture.source);
+    assert.equal(snapshot.valid, true, JSON.stringify(snapshot.diagnostics));
+    assert.equal(Buffer.from(await snapshot.readArtifact(fixture.digest)).toString(), 'good');
+
+    await writeFile(fixture.artifactPath, 'evil');
+    assert.equal(snapshot.valid, true, 'loading remains lazy until the artifact is materialized');
+    await assert.rejects(
+      snapshot.readArtifact(fixture.digest),
+      (error: unknown) =>
+        error instanceof ArtifactReadError && error.code === 'ARTIFACT_DIGEST_MISMATCH',
+    );
+
+    await writeFile(fixture.artifactPath, 'grown');
+    await assert.rejects(
+      snapshot.readArtifact(fixture.digest),
+      (error: unknown) =>
+        error instanceof ArtifactReadError && error.code === 'ARTIFACT_SIZE_MISMATCH',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('rejects artifact directory links outside the snapshot and rechecks delayed reads', async () => {
+  const root = await mkdtemp(join(process.env.TEMP ?? process.cwd(), 'alsnap-link-boundary-'));
+  try {
+    const fixture = await createArtifactSnapshot(root);
+    const initialValidation = await validateSnapshotDirectory(fixture.source);
+    const initialSnapshot = await loadTraceSnapshot(fixture.source);
+    assert.equal(initialValidation.valid, true, JSON.stringify(initialValidation.diagnostics));
+    assert.equal(initialSnapshot.valid, true, JSON.stringify(initialSnapshot.diagnostics));
+    assert.equal(
+      Buffer.from(await initialSnapshot.readArtifact(fixture.digest)).toString(),
+      'good',
+    );
+
+    await writeFile(join(fixture.external, `sha256-${fixture.digest}`), 'good');
+    await rm(join(fixture.source, 'artifacts'), { recursive: true, force: true });
+    await symlink(
+      fixture.external,
+      join(fixture.source, 'artifacts'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+
+    const validation = await validateSnapshotDirectory(fixture.source);
+    const snapshot = await loadTraceSnapshot(fixture.source);
+    assert.equal(validation.valid, false);
+    assert.equal(snapshot.valid, false);
+    assert.ok(
+      validation.diagnostics.some((diagnostic) => diagnostic.code === 'UNTRUSTED_ARTIFACT_ENTRY'),
+    );
+    assert.ok(
+      snapshot.diagnostics.some((diagnostic) => diagnostic.code === 'UNTRUSTED_ARTIFACT_DIRECTORY'),
+    );
+    await assert.rejects(
+      initialSnapshot.readArtifact(fixture.digest),
+      /not a trusted snapshot file/u,
+    );
+    await assert.rejects(snapshot.readArtifact(fixture.digest), /missing/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('rejects checkpoint directory links outside the snapshot boundary', async () => {
+  const root = await mkdtemp(join(process.env.TEMP ?? process.cwd(), 'alsnap-checkpoint-link-'));
+  try {
+    const fixture = await createArtifactSnapshot(root);
+    await writeFile(
+      join(fixture.external, '000001.json'),
+      JSON.stringify({
+        schema_version: '0.1.0',
+        checkpoint_id: 'cp_00000000-0000-4000-8000-000000000001',
+        run_id: 'run_00000000-0000-4000-8000-000000000001',
+        created_at: '2026-09-06T02:00:00.000Z',
+        last_event_id: 'evt_00000000-0000-4000-8000-000000000001',
+        sequence: 1,
+        state_hash: 'a'.repeat(64),
+        state: {},
+      }),
+    );
+    await symlink(
+      fixture.external,
+      join(fixture.source, 'checkpoints'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+
+    const validation = await validateSnapshotDirectory(fixture.source);
+    const snapshot = await loadTraceSnapshot(fixture.source);
+    assert.equal(validation.valid, false);
+    assert.equal(snapshot.valid, false);
+    assert.ok(
+      validation.diagnostics.some(
+        (diagnostic) => diagnostic.code === 'UNTRUSTED_CHECKPOINT_DIRECTORY',
+      ),
+    );
+    assert.ok(
+      snapshot.diagnostics.some(
+        (diagnostic) => diagnostic.code === 'UNTRUSTED_CHECKPOINT_DIRECTORY',
+      ),
+    );
+    assert.deepEqual(snapshot.checkpoints, []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('rejects final artifact links and non-regular artifact entries', async (t) => {
+  const root = await mkdtemp(join(process.env.TEMP ?? process.cwd(), 'alsnap-artifact-entry-'));
+  try {
+    const fixture = await createArtifactSnapshot(root);
+    const initialSnapshot = await loadTraceSnapshot(fixture.source);
+    const externalArtifact = join(fixture.external, `sha256-${fixture.digest}`);
+    await writeFile(externalArtifact, 'good');
+    await rm(fixture.artifactPath, { force: true });
+
+    try {
+      await symlink(externalArtifact, fixture.artifactPath, 'file');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EPERM') {
+        t.skip('The current Windows configuration does not permit file symlinks.');
+        return;
+      }
+      throw error;
+    }
+
+    const validation = await validateSnapshotDirectory(fixture.source);
+    const snapshot = await loadTraceSnapshot(fixture.source);
+    assert.equal(validation.valid, false);
+    assert.equal(snapshot.valid, false);
+    assert.ok(
+      validation.diagnostics.some((diagnostic) => diagnostic.code === 'UNTRUSTED_ARTIFACT_ENTRY'),
+    );
+    assert.ok(
+      snapshot.diagnostics.some((diagnostic) => diagnostic.code === 'UNTRUSTED_ARTIFACT_ENTRY'),
+    );
+    await assert.rejects(
+      initialSnapshot.readArtifact(fixture.digest),
+      /not a trusted snapshot file/u,
+    );
+    await assert.rejects(snapshot.readArtifact(fixture.digest), /missing/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('rejects non-regular artifact entries', async () => {
+  const root = await mkdtemp(join(process.env.TEMP ?? process.cwd(), 'alsnap-special-artifact-'));
+  try {
+    const fixture = await createArtifactSnapshot(root);
+    await rm(fixture.artifactPath, { force: true });
+    await mkdir(fixture.artifactPath);
+
+    const validation = await validateSnapshotDirectory(fixture.source);
+    const snapshot = await loadTraceSnapshot(fixture.source);
+    assert.equal(validation.valid, false);
+    assert.equal(snapshot.valid, false);
+    assert.ok(
+      validation.diagnostics.some((diagnostic) => diagnostic.code === 'UNTRUSTED_ARTIFACT_ENTRY'),
+    );
+    assert.ok(
+      snapshot.diagnostics.some((diagnostic) => diagnostic.code === 'UNTRUSTED_ARTIFACT_ENTRY'),
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('retains unknown-version events and reports schema diagnostics', async () => {

@@ -141,8 +141,43 @@ function pointerSegments(path: string): string[] {
 
 type MutableJsonContainer = JsonObject | JsonValue[];
 
+const dangerousStateKeys = new Set(['__proto__', 'constructor', 'prototype']);
+
 function isArrayIndex(segment: string): boolean {
   return /^(0|[1-9][0-9]*)$/.test(segment);
+}
+
+function assertSafeStatePath(segments: readonly string[]): void {
+  const dangerousSegment = segments.find((segment) => dangerousStateKeys.has(segment));
+  if (dangerousSegment !== undefined) {
+    throw new StateReconstructionError(
+      'STATE_EVENT_INVALID',
+      `State path segment "${dangerousSegment}" is not permitted.`,
+    );
+  }
+}
+
+function assertSafeStateValue(value: JsonValue): void {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      assertSafeStateValue(item);
+    }
+    return;
+  }
+
+  if (!isRecord(value)) {
+    return;
+  }
+
+  for (const key of Object.keys(value)) {
+    if (dangerousStateKeys.has(key)) {
+      throw new StateReconstructionError(
+        'STATE_VALUE_INVALID',
+        `State value property "${key}" is not permitted.`,
+      );
+    }
+    assertSafeStateValue(value[key] as JsonValue);
+  }
 }
 
 function getContainerValue(
@@ -150,12 +185,12 @@ function getContainerValue(
   segment: string,
 ): JsonValue | undefined {
   if (Array.isArray(container)) {
-    if (!isArrayIndex(segment)) {
+    if (!isArrayIndex(segment) || !Object.hasOwn(container, segment)) {
       return undefined;
     }
     return container[Number(segment)];
   }
-  return container[segment];
+  return Object.hasOwn(container, segment) ? container[segment] : undefined;
 }
 
 function setContainerValue(
@@ -181,15 +216,29 @@ function setContainerValue(
         `Array state path index ${segment} is outside the current state.`,
       );
     }
-    container[index] = value;
+    Object.defineProperty(container, segment, {
+      configurable: true,
+      enumerable: true,
+      value,
+      writable: true,
+    });
     return;
   }
-  container[segment] = value;
+  Object.defineProperty(container, segment, {
+    configurable: true,
+    enumerable: true,
+    value,
+    writable: true,
+  });
 }
 
 function deleteContainerValue(container: MutableJsonContainer, segment: string): void {
   if (Array.isArray(container)) {
-    if (!isArrayIndex(segment) || Number(segment) >= container.length) {
+    if (
+      !isArrayIndex(segment) ||
+      Number(segment) >= container.length ||
+      !Object.hasOwn(container, segment)
+    ) {
       throw new StateReconstructionError(
         'STATE_EVENT_INVALID',
         `Array state path index "${segment}" does not exist.`,
@@ -198,7 +247,7 @@ function deleteContainerValue(container: MutableJsonContainer, segment: string):
     container.splice(Number(segment), 1);
     return;
   }
-  if (!(segment in container)) {
+  if (!Object.hasOwn(container, segment)) {
     throw new StateReconstructionError(
       'STATE_EVENT_INVALID',
       `State path segment "${segment}" does not exist.`,
@@ -267,7 +316,9 @@ function requireValue(payload: StateChangedPayload): JsonValue {
       `State operation "${payload.operation}" requires a value.`,
     );
   }
-  return payload.value as JsonValue;
+  const value = payload.value as JsonValue;
+  assertSafeStateValue(value);
+  return value;
 }
 
 function applyStateChanged(state: RecoverableState, payload: StateChangedPayload): void {
@@ -278,6 +329,7 @@ function applyStateChanged(state: RecoverableState, payload: StateChangedPayload
       'State changes must target a property or nested container, not the root.',
     );
   }
+  assertSafeStatePath(segments);
 
   const parent = parentAtPath(state, segments);
   const leaf = segments.at(-1)!;

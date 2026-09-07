@@ -1,13 +1,18 @@
+import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { lstat, readFile, readdir, stat } from 'node:fs/promises';
-import { basename, join, resolve } from 'node:path';
+import { readFile, readdir } from 'node:fs/promises';
+import { basename, join } from 'node:path';
 
 import {
   snapshotSchemaVersion,
+  SnapshotPathError,
+  createSnapshotPathBoundary,
+  inspectSnapshotPath,
   type ArtifactReference,
   type Checkpoint,
   type EventEnvelope,
   type SnapshotManifest,
+  type SnapshotPathBoundary,
   validateSnapshot,
   type ValidationDiagnostic,
 } from '@agent-loop-snapshot/schema';
@@ -42,6 +47,24 @@ export interface TraceDiagnostic {
   source: TraceDiagnosticSource;
   file?: string | undefined;
   line?: number | undefined;
+}
+
+/** A failure while materializing an artifact from a loaded snapshot. */
+export class ArtifactReadError extends Error {
+  constructor(
+    readonly code:
+      | 'ARTIFACT_INVALID_DIGEST'
+      | 'ARTIFACT_MISSING'
+      | 'ARTIFACT_TOO_LARGE'
+      | 'ARTIFACT_UNTRUSTED'
+      | 'ARTIFACT_UNAVAILABLE'
+      | 'ARTIFACT_SIZE_MISMATCH'
+      | 'ARTIFACT_DIGEST_MISMATCH',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'ArtifactReadError';
+  }
 }
 
 export interface ArtifactMetadata {
@@ -182,19 +205,24 @@ function collectArtifactReferences(
 }
 
 async function readJsonFile(
+  boundary: SnapshotPathBoundary,
   filePath: string,
   source: TraceDiagnosticSource,
   path: string,
   diagnostics: TraceDiagnostic[],
 ): Promise<ParsedJsonFile | undefined> {
   try {
+    const trustedFile = await inspectSnapshotPath(boundary, filePath, 'file');
     return {
-      value: JSON.parse(await readFile(filePath, 'utf8')) as unknown,
+      value: JSON.parse(await readFile(trustedFile.path, 'utf8')) as unknown,
     };
   } catch (error) {
     addDiagnostic(diagnostics, {
       severity: 'error',
-      code: 'INVALID_JSON',
+      code:
+        error instanceof SnapshotPathError && error.code !== 'MISSING'
+          ? 'UNTRUSTED_SNAPSHOT_ENTRY'
+          : 'INVALID_JSON',
       path,
       message: error instanceof Error ? error.message : `Could not read ${basename(filePath)}.`,
       source,
@@ -205,35 +233,35 @@ async function readJsonFile(
 }
 
 async function readManifest(
-  directory: string,
+  boundary: SnapshotPathBoundary,
   diagnostics: TraceDiagnostic[],
 ): Promise<{ value?: unknown; source?: 'temporary' | 'final' }> {
   const candidates: Array<{ path: string; source: 'temporary' | 'final' }> = [
-    { path: join(directory, 'manifest.json.tmp'), source: 'temporary' },
-    { path: join(directory, 'manifest.json'), source: 'final' },
+    { path: join(boundary.directory, 'manifest.json.tmp'), source: 'temporary' },
+    { path: join(boundary.directory, 'manifest.json'), source: 'final' },
   ];
   let manifestFilePresent = false;
 
   for (const candidate of candidates) {
     try {
-      const parsed = JSON.parse(await readFile(candidate.path, 'utf8')) as unknown;
+      const trustedFile = await inspectSnapshotPath(boundary, candidate.path, 'file');
+      const parsed = JSON.parse(await readFile(trustedFile.path, 'utf8')) as unknown;
       manifestFilePresent = true;
       return { value: parsed, source: candidate.source };
     } catch (error) {
-      try {
-        await stat(candidate.path);
-        manifestFilePresent = true;
-        addDiagnostic(diagnostics, {
-          severity: 'error',
-          code: 'INVALID_JSON',
-          path: '/manifest',
-          message: error instanceof Error ? error.message : 'Manifest is not valid JSON.',
-          source: 'manifest',
-          file: basename(candidate.path),
-        });
-      } catch {
+      if (error instanceof SnapshotPathError && error.code === 'MISSING') {
         // A missing manifest candidate is normal while checking the other candidate.
+        continue;
       }
+      manifestFilePresent = true;
+      addDiagnostic(diagnostics, {
+        severity: 'error',
+        code: error instanceof SnapshotPathError ? 'UNTRUSTED_MANIFEST_FILE' : 'INVALID_JSON',
+        path: '/manifest',
+        message: error instanceof Error ? error.message : 'Manifest is not valid JSON.',
+        source: 'manifest',
+        file: basename(candidate.path),
+      });
     }
   }
 
@@ -271,31 +299,23 @@ function addJsonlDiagnostic(
 }
 
 async function readJsonlFile(
+  boundary: SnapshotPathBoundary,
   filePath: string,
   diagnostics: TraceDiagnostic[],
   maxBytes: number,
 ): Promise<JsonlReadResult> {
   const values: unknown[] = [];
+  let trustedPath: string;
 
   try {
-    const fileStats = await lstat(filePath);
-    if (!fileStats.isFile()) {
-      addDiagnostic(diagnostics, {
-        severity: 'error',
-        code: 'UNTRUSTED_EVENTS_FILE',
-        path: '/events',
-        message: 'events.jsonl must be a regular file inside the snapshot directory.',
-        source: 'events',
-        file: 'events.jsonl',
-      });
-      return { values };
-    }
-    if (fileStats.size > maxBytes) {
+    const trustedFile = await inspectSnapshotPath(boundary, filePath, 'file');
+    trustedPath = trustedFile.path;
+    if (trustedFile.size > maxBytes) {
       addDiagnostic(diagnostics, {
         severity: 'error',
         code: 'EVENT_FILE_TOO_LARGE',
         path: '/events',
-        message: `events.jsonl is ${String(fileStats.size)} bytes, exceeding the ${String(maxBytes)} byte limit.`,
+        message: `events.jsonl is ${String(trustedFile.size)} bytes, exceeding the ${String(maxBytes)} byte limit.`,
         source: 'events',
         file: 'events.jsonl',
       });
@@ -304,7 +324,10 @@ async function readJsonlFile(
   } catch (error) {
     addDiagnostic(diagnostics, {
       severity: 'error',
-      code: 'MISSING_EVENTS_FILE',
+      code:
+        error instanceof SnapshotPathError && error.code !== 'MISSING'
+          ? 'UNTRUSTED_EVENTS_FILE'
+          : 'MISSING_EVENTS_FILE',
       path: '/events',
       message: error instanceof Error ? error.message : 'events.jsonl could not be read.',
       source: 'events',
@@ -313,7 +336,7 @@ async function readJsonlFile(
     return { values };
   }
 
-  const stream = createReadStream(filePath, { encoding: 'utf8' });
+  const stream = createReadStream(trustedPath, { encoding: 'utf8' });
 
   let buffer = '';
   let line = 0;
@@ -368,19 +391,34 @@ async function readJsonlFile(
 }
 
 async function readCheckpoints(
+  boundary: SnapshotPathBoundary,
   directory: string,
   diagnostics: TraceDiagnostic[],
 ): Promise<unknown[]> {
   let fileNames: string[];
   try {
-    fileNames = (await readdir(directory)).filter((fileName) => fileName.endsWith('.json')).sort();
-  } catch {
+    const trustedDirectory = await inspectSnapshotPath(boundary, directory, 'directory');
+    fileNames = (await readdir(trustedDirectory.path))
+      .filter((fileName) => fileName.endsWith('.json'))
+      .sort();
+  } catch (error) {
+    if (error instanceof SnapshotPathError && error.code !== 'MISSING') {
+      addDiagnostic(diagnostics, {
+        severity: 'error',
+        code: 'UNTRUSTED_CHECKPOINT_DIRECTORY',
+        path: '/checkpoints',
+        message: error.message,
+        source: 'checkpoints',
+        file: basename(directory),
+      });
+    }
     return [];
   }
 
   const checkpoints: unknown[] = [];
   for (const fileName of fileNames) {
     const parsed = await readJsonFile(
+      boundary,
       join(directory, fileName),
       'checkpoints',
       `/checkpoints/${checkpoints.length}`,
@@ -535,20 +573,31 @@ function buildStructuralDiagnostics(
 }
 
 async function loadArtifactMetadata(
-  directory: string,
+  boundary: SnapshotPathBoundary,
   referenceMap: Map<string, Array<{ path: string; reference: ArtifactReference }>>,
   diagnostics: TraceDiagnostic[],
   maxArtifactBytes: number,
 ): Promise<Map<string, ArtifactMetadata>> {
-  const artifactDirectory = join(directory, 'artifacts');
+  const artifactDirectory = join(boundary.directory, 'artifacts');
   const digests = new Set(referenceMap.keys());
   try {
-    for (const fileName of await readdir(artifactDirectory)) {
+    const trustedDirectory = await inspectSnapshotPath(boundary, artifactDirectory, 'directory');
+    for (const fileName of await readdir(trustedDirectory.path)) {
       if (fileName.startsWith('sha256-')) {
         digests.add(fileName.slice('sha256-'.length));
       }
     }
-  } catch {
+  } catch (error) {
+    if (error instanceof SnapshotPathError && error.code !== 'MISSING') {
+      addDiagnostic(diagnostics, {
+        severity: 'error',
+        code: 'UNTRUSTED_ARTIFACT_DIRECTORY',
+        path: '/artifacts',
+        message: error.message,
+        source: 'artifacts',
+        file: artifactDirectory,
+      });
+    }
     // An artifact directory is optional when a snapshot has no artifact references.
   }
 
@@ -558,31 +607,30 @@ async function loadArtifactMetadata(
     let exists = false;
     let actualByteLength: number | undefined;
     try {
-      const fileStats = await lstat(artifactPath);
-      exists = fileStats.isFile();
-      if (exists) {
-        actualByteLength = fileStats.size;
-        if (actualByteLength > maxArtifactBytes) {
-          addDiagnostic(diagnostics, {
-            severity: 'error',
-            code: 'ARTIFACT_TOO_LARGE',
-            path: `/artifacts/${digest}`,
-            message: `Artifact "${digest}" is ${String(actualByteLength)} bytes, exceeding the ${String(maxArtifactBytes)} byte limit.`,
-            source: 'artifacts',
-            file: artifactPath,
-          });
-        }
-      } else {
+      const trustedFile = await inspectSnapshotPath(boundary, artifactPath, 'file');
+      exists = true;
+      actualByteLength = trustedFile.size;
+      if (actualByteLength > maxArtifactBytes) {
         addDiagnostic(diagnostics, {
           severity: 'error',
-          code: 'UNTRUSTED_ARTIFACT_ENTRY',
+          code: 'ARTIFACT_TOO_LARGE',
           path: `/artifacts/${digest}`,
-          message: 'Artifacts must be regular files inside the snapshot artifact directory.',
+          message: `Artifact "${digest}" is ${String(actualByteLength)} bytes, exceeding the ${String(maxArtifactBytes)} byte limit.`,
           source: 'artifacts',
           file: artifactPath,
         });
       }
-    } catch {
+    } catch (error) {
+      if (error instanceof SnapshotPathError && error.code !== 'MISSING') {
+        addDiagnostic(diagnostics, {
+          severity: 'error',
+          code: 'UNTRUSTED_ARTIFACT_ENTRY',
+          path: `/artifacts/${digest}`,
+          message: error.message,
+          source: 'artifacts',
+          file: artifactPath,
+        });
+      }
       // The missing-artifact diagnostic below is emitted for referenced artifacts.
     }
 
@@ -703,7 +751,8 @@ export async function loadTraceSnapshot(
   directory: string,
   options: TraceLoadOptions = {},
 ): Promise<TraceSnapshot> {
-  const root = resolve(directory);
+  const boundary = await createSnapshotPathBoundary(directory);
+  const root = boundary.directory;
   const maxEventFileBytes = limit(
     options.maxEventFileBytes,
     defaultTraceLoadLimits.maxEventFileBytes,
@@ -715,13 +764,14 @@ export async function loadTraceSnapshot(
     'maxArtifactBytes',
   );
   const diagnostics: TraceDiagnostic[] = [];
-  const manifestResult = await readManifest(root, diagnostics);
+  const manifestResult = await readManifest(boundary, diagnostics);
   const eventsResult = await readJsonlFile(
+    boundary,
     join(root, 'events.jsonl'),
     diagnostics,
     maxEventFileBytes,
   );
-  const checkpointValues = await readCheckpoints(join(root, 'checkpoints'), diagnostics);
+  const checkpointValues = await readCheckpoints(boundary, join(root, 'checkpoints'), diagnostics);
   const manifest = isRecord(manifestResult.value)
     ? (manifestResult.value as unknown as SnapshotManifest)
     : undefined;
@@ -746,7 +796,12 @@ export async function loadTraceSnapshot(
   checkpointValues.forEach((checkpoint, index) =>
     collectArtifactReferences(checkpoint, `/checkpoints/${index}`, referenceMap),
   );
-  const artifacts = await loadArtifactMetadata(root, referenceMap, diagnostics, maxArtifactBytes);
+  const artifacts = await loadArtifactMetadata(
+    boundary,
+    referenceMap,
+    diagnostics,
+    maxArtifactBytes,
+  );
   const artifactReferences = new Map<string, readonly ArtifactReference[]>(
     [...referenceMap.entries()].map(([digest, references]) => [
       digest,
@@ -757,19 +812,77 @@ export async function loadTraceSnapshot(
 
   const readArtifact = async (digest: string): Promise<Uint8Array> => {
     if (!/^[a-f0-9]{64}$/.test(digest)) {
-      throw new Error(`Invalid artifact digest "${digest}".`);
+      throw new ArtifactReadError(
+        'ARTIFACT_INVALID_DIGEST',
+        `Invalid artifact digest "${digest}".`,
+      );
     }
     const metadata = artifacts.get(digest);
     if (metadata === undefined || !metadata.exists) {
-      throw new Error(`Artifact "${digest}" is missing.`);
+      throw new ArtifactReadError('ARTIFACT_MISSING', `Artifact "${digest}" is missing.`);
     }
     if (
       metadata.actual_byte_length !== undefined &&
       metadata.actual_byte_length > maxArtifactBytes
     ) {
-      throw new Error(`Artifact "${digest}" exceeds the configured read limit.`);
+      throw new ArtifactReadError(
+        'ARTIFACT_TOO_LARGE',
+        `Artifact "${digest}" exceeds the configured read limit.`,
+      );
     }
-    return new Uint8Array(await readFile(metadata.path));
+    let trustedFile;
+    try {
+      trustedFile = await inspectSnapshotPath(boundary, metadata.path, 'file');
+    } catch (error) {
+      throw new ArtifactReadError(
+        'ARTIFACT_UNTRUSTED',
+        error instanceof Error
+          ? `Artifact "${digest}" is not a trusted snapshot file: ${error.message}`
+          : `Artifact "${digest}" is not a trusted snapshot file.`,
+      );
+    }
+    if (trustedFile.size > maxArtifactBytes) {
+      throw new ArtifactReadError(
+        'ARTIFACT_TOO_LARGE',
+        `Artifact "${digest}" exceeds the configured read limit.`,
+      );
+    }
+    let bytes: Uint8Array;
+    try {
+      bytes = new Uint8Array(await readFile(trustedFile.path));
+    } catch (error) {
+      throw new ArtifactReadError(
+        'ARTIFACT_UNAVAILABLE',
+        error instanceof Error
+          ? `Artifact "${digest}" could not be read: ${error.message}`
+          : `Artifact "${digest}" could not be read.`,
+      );
+    }
+    if (bytes.byteLength > maxArtifactBytes) {
+      throw new ArtifactReadError(
+        'ARTIFACT_TOO_LARGE',
+        `Artifact "${digest}" exceeds the configured read limit.`,
+      );
+    }
+    const mismatchedReference = artifactReferences
+      .get(digest)
+      ?.find((reference) => reference.byte_length !== bytes.byteLength);
+    if (mismatchedReference !== undefined) {
+      throw new ArtifactReadError(
+        'ARTIFACT_SIZE_MISMATCH',
+        `Artifact "${digest}" is ${String(bytes.byteLength)} bytes, expected ${String(
+          mismatchedReference.byte_length,
+        )} bytes.`,
+      );
+    }
+    const actualDigest = createHash('sha256').update(bytes).digest('hex');
+    if (actualDigest !== digest) {
+      throw new ArtifactReadError(
+        'ARTIFACT_DIGEST_MISMATCH',
+        `Artifact "${digest}" does not match its SHA-256 digest.`,
+      );
+    }
+    return bytes;
   };
 
   return {

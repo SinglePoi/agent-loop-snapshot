@@ -173,16 +173,33 @@ function nodeId(kind: CallGroup['kind'], index: number): WorkflowNodeId {
 function requestParentDependencies(
   group: CallGroup,
   sourceNodeByEventId: ReadonlyMap<string, WorkflowNodeId>,
+  sourceEventById: ReadonlyMap<string, EventEnvelope<string, unknown>>,
   ownNodeId: WorkflowNodeId,
 ): WorkflowNode['depends_on'] {
   const dependencies = new Map<WorkflowNodeId, WorkflowNode['depends_on'][number]>();
   group.requestEvents.forEach((request) => {
-    request.parent_ids.forEach((parentId) => {
-      const parentNodeId = sourceNodeByEventId.get(parentId);
-      if (parentNodeId !== undefined && parentNodeId !== ownNodeId) {
-        dependencies.set(parentNodeId, { node_id: parentNodeId, on: 'success' });
+    const visited = new Set<string>();
+    const pending = [...request.parent_ids];
+    while (pending.length > 0) {
+      const eventId = pending.pop();
+      if (eventId === undefined || visited.has(eventId)) {
+        continue;
       }
-    });
+      visited.add(eventId);
+
+      const ancestorNodeId = sourceNodeByEventId.get(eventId);
+      if (ancestorNodeId !== undefined) {
+        if (ancestorNodeId !== ownNodeId) {
+          dependencies.set(ancestorNodeId, { node_id: ancestorNodeId, on: 'success' });
+        }
+        continue;
+      }
+
+      const ancestor = sourceEventById.get(eventId);
+      if (ancestor !== undefined) {
+        pending.push(...ancestor.parent_ids);
+      }
+    }
   });
   return [...dependencies.values()].sort((left, right) =>
     left.node_id.localeCompare(right.node_id),
@@ -289,6 +306,7 @@ export function compileTraceToWorkflow(trace: TraceSnapshot): TraceCompilationRe
       sourceNodeByEventId.set(event.event_id, id);
     });
   });
+  const sourceEventById = new Map(trace.events.map((event) => [event.event_id, event]));
 
   const nodes: WorkflowNode[] = groups.map((group, index) => {
     const id = nodeId(group.kind, index);
@@ -300,7 +318,7 @@ export function compileTraceToWorkflow(trace: TraceSnapshot): TraceCompilationRe
     const request = group.requestEvents[0]!;
     const base = {
       node_id: id,
-      depends_on: requestParentDependencies(group, sourceNodeByEventId, id),
+      depends_on: requestParentDependencies(group, sourceNodeByEventId, sourceEventById, id),
       ...(group.requestEvents.length > 1 || retryOn.length > 0
         ? {
             retry: {
