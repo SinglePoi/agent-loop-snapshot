@@ -8,10 +8,21 @@ import type {
 
 export type ReplayAdapterMode = 'live' | 'recorded';
 
-export type ReplayAdapterKind = 'model' | 'tool' | 'clock' | 'random' | 'environment';
+export type ReplayAdapterKind =
+  'model' | 'tool' | 'clock' | 'random' | 'environment' | 'agent' | 'verifier';
 
 export type ReplayAdapterCapability =
-  'model.complete' | 'tool.call' | 'clock.now' | 'random.next' | 'environment.read';
+  | 'model.complete'
+  | 'tool.call'
+  | 'clock.now'
+  | 'random.next'
+  | 'environment.read'
+  | 'agent.execute'
+  | 'verifier.verify'
+  | 'semantic.node.agent_task'
+  | 'semantic.node.tool_call'
+  | 'semantic.node.verification'
+  | 'semantic.node.human_approval';
 
 export interface ReplayAdapterDescriptor {
   readonly name: string;

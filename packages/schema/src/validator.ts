@@ -11,6 +11,9 @@ import {
   type Checkpoint,
   type EventEnvelope,
   type EventType,
+  type JsonSchema,
+  type WorkflowDocument,
+  type WorkflowNodeId,
 } from './index.js';
 
 const snapshotSchemaVersion = '0.1.0';
@@ -19,11 +22,13 @@ const schemaFiles = {
   checkpoint: 'checkpoint.schema.json',
   events: 'events.schema.json',
   manifest: 'manifest.schema.json',
+  workflow: 'workflow.schema.json',
 } as const;
 
 export type DiagnosticSeverity = 'error' | 'warning';
 
-export type DiagnosticSource = 'manifest' | 'events' | 'checkpoints' | 'artifacts' | 'integrity';
+export type DiagnosticSource =
+  'manifest' | 'events' | 'checkpoints' | 'artifacts' | 'integrity' | 'workflow';
 
 export interface ValidationDiagnostic {
   severity: DiagnosticSeverity;
@@ -81,7 +86,29 @@ const validators = {
   checkpoint: ajv.compile(loadSchema(schemaFiles.checkpoint)),
   events: ajv.compile(loadSchema(schemaFiles.events)),
   manifest: ajv.compile(loadSchema(schemaFiles.manifest)),
+  workflow: ajv.compile(loadSchema(schemaFiles.workflow)),
 } satisfies Record<string, ValidateFunction<unknown>>;
+
+export interface WorkflowValidationDiagnostic {
+  severity: DiagnosticSeverity;
+  code: string;
+  path: string;
+  message: string;
+  source: 'workflow';
+}
+
+export interface WorkflowValidationResult {
+  valid: boolean;
+  diagnostics: WorkflowValidationDiagnostic[];
+}
+
+export interface JsonSchemaValueValidationResult {
+  valid: boolean;
+  diagnostics: readonly {
+    readonly path: string;
+    readonly message: string;
+  }[];
+}
 
 function escapeJsonPointerSegment(segment: string): string {
   return segment.replaceAll('~', '~0').replaceAll('/', '~1');
@@ -128,6 +155,208 @@ function schemaDiagnostics(
     ...(file === undefined ? {} : { file }),
     ...(line === undefined ? {} : { line }),
   }));
+}
+
+function workflowSemanticDiagnostics(document: WorkflowDocument): WorkflowValidationDiagnostic[] {
+  const diagnostics: WorkflowValidationDiagnostic[] = [];
+  const nodeIds = new Set<WorkflowNodeId>();
+  const verifierIds = new Set<string>();
+
+  document.verifiers?.forEach((verifier, index) => {
+    if (verifierIds.has(verifier.verifier_id)) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'DUPLICATE_WORKFLOW_VERIFIER_ID',
+        path: `/verifiers/${index}/verifier_id`,
+        message: `Verifier ID "${verifier.verifier_id}" is duplicated.`,
+        source: 'workflow',
+      });
+    }
+    verifierIds.add(verifier.verifier_id);
+  });
+
+  document.nodes.forEach((node, index) => {
+    if (nodeIds.has(node.node_id)) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'DUPLICATE_WORKFLOW_NODE_ID',
+        path: `/nodes/${index}/node_id`,
+        message: `Node ID "${node.node_id}" is duplicated.`,
+        source: 'workflow',
+      });
+    }
+    nodeIds.add(node.node_id);
+  });
+
+  document.nodes.forEach((node, index) => {
+    node.depends_on.forEach((dependency, dependencyIndex) => {
+      if (!nodeIds.has(dependency.node_id)) {
+        diagnostics.push({
+          severity: 'error',
+          code: 'MISSING_WORKFLOW_DEPENDENCY',
+          path: `/nodes/${index}/depends_on/${dependencyIndex}/node_id`,
+          message: `Dependency "${dependency.node_id}" does not name a workflow node.`,
+          source: 'workflow',
+        });
+      }
+      if (dependency.node_id === node.node_id) {
+        diagnostics.push({
+          severity: 'error',
+          code: 'SELF_WORKFLOW_DEPENDENCY',
+          path: `/nodes/${index}/depends_on/${dependencyIndex}/node_id`,
+          message: 'A workflow node cannot depend on itself.',
+          source: 'workflow',
+        });
+      }
+    });
+
+    if (node.kind === 'verification' && !verifierIds.has(node.verifier_id)) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'MISSING_WORKFLOW_VERIFIER',
+        path: `/nodes/${index}/verifier_id`,
+        message: `Verifier "${node.verifier_id}" is not declared by the workflow.`,
+        source: 'workflow',
+      });
+    }
+
+    node.success_conditions.forEach((condition, conditionIndex) => {
+      if (condition.kind === 'verifier' && !verifierIds.has(condition.verifier_id ?? '')) {
+        diagnostics.push({
+          severity: 'error',
+          code: 'MISSING_WORKFLOW_VERIFIER',
+          path: `/nodes/${index}/success_conditions/${conditionIndex}/verifier_id`,
+          message: `Verifier "${condition.verifier_id ?? ''}" is not declared by the workflow.`,
+          source: 'workflow',
+        });
+      }
+    });
+
+    const references = [
+      ...(node.condition === undefined
+        ? []
+        : [{ path: `/nodes/${index}/condition/from`, value: node.condition.from }]),
+      ...node.success_conditions.flatMap((successCondition, conditionIndex) =>
+        successCondition.kind === 'condition' && successCondition.condition !== undefined
+          ? [
+              {
+                path: `/nodes/${index}/success_conditions/${conditionIndex}/condition/from`,
+                value: successCondition.condition.from,
+              },
+            ]
+          : [],
+      ),
+    ];
+    references.forEach((reference) => {
+      const isKnown =
+        reference.value.kind === 'input'
+          ? Object.hasOwn(document.inputs, reference.value.name)
+          : nodeIds.has(reference.value.name as WorkflowNodeId);
+      if (!isKnown) {
+        diagnostics.push({
+          severity: 'error',
+          code: 'MISSING_WORKFLOW_REFERENCE',
+          path: reference.path,
+          message: `${reference.value.kind === 'input' ? 'Input' : 'Node output'} reference "${reference.value.name}" is not declared.`,
+          source: 'workflow',
+        });
+      }
+    });
+  });
+
+  Object.entries(document.outputs).forEach(([name, output]) => {
+    if (!nodeIds.has(output.from.node_id)) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'MISSING_WORKFLOW_OUTPUT_NODE',
+        path: `/outputs/${escapeJsonPointerSegment(name)}/from/node_id`,
+        message: `Output "${name}" references unknown node "${output.from.node_id}".`,
+        source: 'workflow',
+      });
+    }
+  });
+
+  const dependencies = new Map(
+    document.nodes.map((node) => [
+      node.node_id,
+      node.depends_on
+        .map((dependency) => dependency.node_id)
+        .filter((nodeId) => nodeIds.has(nodeId)),
+    ]),
+  );
+  const visited = new Set<string>();
+  const active = new Set<string>();
+  const visit = (nodeId: WorkflowNodeId): void => {
+    if (active.has(nodeId)) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'WORKFLOW_DEPENDENCY_CYCLE',
+        path: '/nodes',
+        message: `Workflow dependencies contain a cycle through "${nodeId}".`,
+        source: 'workflow',
+      });
+      return;
+    }
+    if (visited.has(nodeId)) {
+      return;
+    }
+    active.add(nodeId);
+    dependencies.get(nodeId)?.forEach(visit);
+    active.delete(nodeId);
+    visited.add(nodeId);
+  };
+  dependencies.forEach((_, nodeId) => visit(nodeId));
+
+  return diagnostics;
+}
+
+/**
+ * Validates an already parsed workflow document. Callers may parse JSON or
+ * YAML first; both serializations intentionally share this exact validator.
+ */
+export function validateWorkflow(document: unknown): WorkflowValidationResult {
+  const diagnostics = schemaDiagnostics(validators.workflow, document, 'workflow', '').map(
+    (diagnostic) => ({ ...diagnostic, source: 'workflow' as const }),
+  );
+
+  if (validators.workflow(document)) {
+    diagnostics.push(...workflowSemanticDiagnostics(document as WorkflowDocument));
+  }
+
+  return {
+    valid: diagnostics.every((diagnostic) => diagnostic.severity !== 'error'),
+    diagnostics,
+  };
+}
+
+/** Validates a JSON value against an embedded Workflow IR JSON Schema fragment. */
+export function validateJsonSchemaValue(
+  schema: JsonSchema,
+  value: unknown,
+): JsonSchemaValueValidationResult {
+  try {
+    const validator = ajv.compile(schema);
+    if (validator(value)) {
+      return { valid: true, diagnostics: [] };
+    }
+    return {
+      valid: false,
+      diagnostics: (validator.errors ?? []).map((error) => ({
+        path: errorPath(error),
+        message: error.message ?? 'JSON Schema validation failed.',
+      })),
+    };
+  } catch (error) {
+    return {
+      valid: false,
+      diagnostics: [
+        {
+          path: '',
+          message: error instanceof Error ? error.message : 'JSON Schema could not be compiled.',
+        },
+      ],
+    };
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

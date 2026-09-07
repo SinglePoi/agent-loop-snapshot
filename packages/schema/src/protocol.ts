@@ -7,4 +7,5 @@ export const schemaFiles = {
   checkpoint: 'checkpoint.schema.json',
   events: 'events.schema.json',
   manifest: 'manifest.schema.json',
+  workflow: 'workflow.schema.json',
 } as const;

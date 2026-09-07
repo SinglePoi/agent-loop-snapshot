@@ -18,6 +18,7 @@
     "./schemas/artifact-reference": "./schemas/artifact-reference.schema.json",
     "./schemas/checkpoint": "./schemas/checkpoint.schema.json",
     "./schemas/events": "./schemas/events.schema.json",
-    "./schemas/manifest": "./schemas/manifest.schema.json"
+    "./schemas/manifest": "./schemas/manifest.schema.json",
+    "./schemas/workflow": "./schemas/workflow.schema.json"
   }
 }

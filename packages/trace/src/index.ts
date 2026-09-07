@@ -20,7 +20,7 @@ export const tracePackageName: TraceLoader['packageName'] = '@agent-loop-snapsho
 
 export type TraceDiagnosticSeverity = 'error' | 'warning';
 export type TraceDiagnosticSource =
-  'manifest' | 'events' | 'checkpoints' | 'artifacts' | 'integrity' | 'loader';
+  'manifest' | 'events' | 'checkpoints' | 'artifacts' | 'integrity' | 'loader' | 'workflow';
 
 export interface TraceDiagnostic {
   severity: TraceDiagnosticSeverity;

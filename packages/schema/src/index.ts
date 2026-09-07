@@ -183,4 +183,129 @@ export interface VerificationCompletedPayload {
   diagnostics?: string[];
 }
 
+/** A JSON Schema fragment used to describe a workflow input or output. */
+export type JsonSchema = JsonObject | boolean;
+
+export type WorkflowId = `wf_${string}`;
+export type WorkflowNodeId = `node_${string}`;
+export type WorkflowVerifierId = `verifier_${string}`;
+
+export type WorkflowNodeKind = 'agent_task' | 'tool_call' | 'verification' | 'human_approval';
+export type WorkflowDependencyOutcome = 'success' | 'failure' | 'always';
+export type WorkflowFailureBehavior = 'stop' | 'continue';
+export type WorkflowConditionOperator = 'exists' | 'equals' | 'not_equals' | 'truthy' | 'falsy';
+
+export interface WorkflowValueReference {
+  kind: 'input' | 'node_output';
+  name: string;
+  path?: string;
+}
+
+/** A condition gates a node and makes branch selection explicit in the IR. */
+export interface WorkflowCondition {
+  from: WorkflowValueReference;
+  operator: WorkflowConditionOperator;
+  value?: JsonValue;
+}
+
+export interface WorkflowDependency {
+  node_id: WorkflowNodeId;
+  on: WorkflowDependencyOutcome;
+}
+
+export interface WorkflowRetryPolicy {
+  max_attempts: number;
+  backoff_ms?: number;
+  retry_on?: string[];
+}
+
+export interface WorkflowPermissionRequirement {
+  side_effect: SideEffectLevel;
+  capabilities?: string[];
+  targets?: string[];
+  requires_approval?: boolean;
+}
+
+export type WorkflowSuccessCondition =
+  | { kind: 'condition'; condition: WorkflowCondition }
+  | { kind: 'output_schema'; schema: JsonSchema }
+  | { kind: 'verifier'; verifier_id: WorkflowVerifierId };
+
+export interface WorkflowInputDefinition {
+  schema: JsonSchema;
+  description?: string;
+  required?: boolean;
+  default?: JsonValue;
+}
+
+export interface WorkflowOutputDefinition {
+  from: {
+    node_id: WorkflowNodeId;
+    path?: string;
+  };
+  schema: JsonSchema;
+  description?: string;
+}
+
+export type WorkflowVerifier =
+  | { verifier_id: WorkflowVerifierId; kind: 'json_schema'; schema: JsonSchema }
+  | { verifier_id: WorkflowVerifierId; kind: 'assertion'; assertion: string }
+  | { verifier_id: WorkflowVerifierId; kind: 'human'; prompt: string };
+
+export interface WorkflowNodeBase {
+  node_id: WorkflowNodeId;
+  kind: WorkflowNodeKind;
+  depends_on: WorkflowDependency[];
+  condition?: WorkflowCondition;
+  retry?: WorkflowRetryPolicy;
+  on_failure: WorkflowFailureBehavior;
+  permissions: WorkflowPermissionRequirement;
+  success_conditions: WorkflowSuccessCondition[];
+}
+
+export interface AgentTaskWorkflowNode extends WorkflowNodeBase {
+  kind: 'agent_task';
+  goal: string;
+  instructions?: string;
+}
+
+export interface ToolCallWorkflowNode extends WorkflowNodeBase {
+  kind: 'tool_call';
+  tool: string;
+  arguments?: JsonObject;
+}
+
+export interface VerificationWorkflowNode extends WorkflowNodeBase {
+  kind: 'verification';
+  verifier_id: WorkflowVerifierId;
+}
+
+export interface HumanApprovalWorkflowNode extends WorkflowNodeBase {
+  kind: 'human_approval';
+  approval_id: string;
+  prompt: string;
+}
+
+export type WorkflowNode =
+  | AgentTaskWorkflowNode
+  | ToolCallWorkflowNode
+  | VerificationWorkflowNode
+  | HumanApprovalWorkflowNode;
+
+/**
+ * A portable, declarative workflow. JSON and YAML representations are parsed
+ * into this same document before validation or execution.
+ */
+export interface WorkflowDocument {
+  schema_version: SnapshotSchemaVersion;
+  workflow_type: 'agent-workflow';
+  workflow_id: WorkflowId;
+  name: string;
+  inputs: Record<string, WorkflowInputDefinition>;
+  nodes: WorkflowNode[];
+  outputs: Record<string, WorkflowOutputDefinition>;
+  verifiers?: WorkflowVerifier[];
+}
+
 export * from './validator.js';
+export * from './migration.js';

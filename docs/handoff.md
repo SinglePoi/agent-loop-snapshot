@@ -156,7 +156,7 @@ M2 收尾补充：
 
 ## 里程碑状态
 
-M1 的 ALS-001 至 ALS-106、M2 的 ALS-201 至 ALS-203，以及 M3 的 ALS-301 至 ALS-304 均已完成。M3 收尾已补齐：`alsnap replay --mode mock --output <directory>` 会落盘一个新快照，artifact-backed state 会被物化，且 Windows 与 Unix 的换行差异不再导致测试失败。固定示例快照继续作为 Trace Loader、Graph、CLI 和 Replay 的端到端夹具，下一步进入 `ALS-401` Workflow IR。
+M1 的 ALS-001 至 ALS-106、M2 的 ALS-201 至 ALS-203、M3 的 ALS-301 至 ALS-304、M4 的 ALS-401 至 ALS-404，以及 M5 的 ALS-501 均已完成。M3 收尾已补齐：`alsnap replay --mode mock --output <directory>` 会落盘一个新快照，artifact-backed state 会被物化，且 Windows 与 Unix 的换行差异不再导致测试失败。固定示例快照继续作为 Trace Loader、Graph、CLI 和 Replay 的端到端夹具；Workflow IR、Trace Compiler、Semantic Replay、Runtime 兼容性检查与 Schema 迁移已构成受策略保护的工作流回放闭环。
 
 ## 验证结果
 
@@ -174,18 +174,18 @@ Prettier：通过
 
 ## 下一步
 
-建议继续执行 `ALS-401`：定义 Workflow IR v0.1。重点是：
+建议继续执行 `ALS-502`：性能、并发和故障注入。重点是：
 
-1. 保留 ALS-106 的 Example Runtime 和 CLI 作为端到端夹具；
-2. 定义 input、node、dependency、condition、retry、output schema、verifier 与权限元数据；
-3. 支持 agent task、tool call、verification、human approval 四类节点，并表达分支、并行、汇合、重试和失败终止；
-4. 使 YAML 与 JSON 共享一份 schema，并保证所有节点都有明确成功条件。
+1. 测量 Recorder 延迟、吞吐、磁盘占用与 Graph 构建耗时，并将阈值和基线记录在仓库；
+2. 注入进程终止、磁盘写入失败、损坏 artifact 和并发乱序完成；
+3. 为并发 Recorder 添加压力测试，并确保部分成功状态始终产生明确诊断；
+4. 保留现有 100k Trace Loader 基准，并补齐新性能/故障夹具。
 
 ## 新会话提示
 
 新会话开始时可直接粘贴：
 
-> 请阅读 `docs/handoff.md` 和 `docs/implementation-plan.md`，基于当前工作区继续执行 ALS-401。保留现有 ALS-001 至 ALS-304 实现，先检查当前代码和测试，再定义 Workflow IR v0.1。
+> 请阅读 `docs/handoff.md`、`docs/schema-compatibility.md` 和 `docs/implementation-plan.md`，基于当前工作区继续执行 ALS-502。保留现有 ALS-001 至 ALS-501 实现，先检查当前代码和测试，再实现性能、并发和故障注入。
 
 ## 工作区注意事项
 
