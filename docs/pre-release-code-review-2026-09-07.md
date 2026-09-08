@@ -3,8 +3,9 @@
 审查日期：2026-09-07  
 范围：ALS-001 至 ALS-503 当前实现及审查时的未提交改动；不包含规划中延期的 Viewer。  
 文档整理时 HEAD：`cd51c7f`；已重新核对下述主要代码位置。  
-最新复审日期：2026-09-07（首轮修复后）。  
-最新结论：暂缓公开发布。首轮发现 5 项 P1、2 项 P2；复审确认 4 项可关闭。ALS-CR-002、ALS-CR-006 与 ALS-CR-007 均已补充修复，待二次复审。正式 `pnpm run release:verify` 已通过，并已覆盖含空格 Windows command launcher 的真实子进程补充场景。
+最新更新：2026-09-08，用户将 ALS-CR-002 标记为“暂时完成，下次检查”；基线为 `a09106a` 加现有工作区改动。
+
+最新结论：其余六项维持可关闭；ALS-CR-002 标记为“暂时完成，下次检查”。此前修复及回归记录保留；最近复查发现的全局自定义规则上下文和扩展事件类型边界，留待下次检查处理。发布仍由负责人另行决策。
 
 本文供 coding agent 实施修复与补充回归测试。位置按审查时源码记录，后续修改以函数名和行为为准。问题编号 `ALS-CR-001` 至 `ALS-CR-007` 为本轮审查编号，不替代原实施计划编号。
 
@@ -13,14 +14,14 @@
 | 编号 | 复审结论 | 后续动作 |
 | --- | --- | --- |
 | ALS-CR-001 | 复审通过，可关闭 | 保留原型污染及合法状态操作回归测试 |
-| ALS-CR-002 | 待二次复审，P1 | 已补充默认 reference 脱敏状态一致性、重复 checkpoint 与 Mock Replay 回归；见下文复审补充 |
+| ALS-CR-002 | 暂时完成，下次检查 | 下次优先复核全局 custom redactor 与协议字段隔离的交互，以及任意扩展事件类型在脱敏流水线中的边界；保留既有真实写盘和状态等价组合测试 |
 | ALS-CR-003 | 复审通过，可关闭 | 保留强制审批、错配审批、策略拒绝与审计顺序测试 |
 | ALS-CR-004 | 复审通过，可关闭 | 保留目录边界、链接及延迟读取检查测试 |
 | ALS-CR-005 | 复审通过，可关闭 | 保留摘要、长度校验及回放失败诊断测试 |
-| ALS-CR-006 | 待二次复审，P2 | 已改为显式栈祖先遍历，并加入 8,000 个中间事件长链回归；见下文复审补充 |
-| ALS-CR-007 | 待二次复审，P2 | 已正确引用 Windows command launcher，并加入含空格路径的真实子进程测试；见下文复审补充 |
+| ALS-CR-006 | 二次复审通过，可关闭 | 保留显式栈遍历、8,000 个中间事件长链及已有依赖语义回归 |
+| ALS-CR-007 | 二次复审通过，可关闭 | 保留含空格路径真实子进程测试及正式 release:verify |
 
-以下各项保留首轮问题描述和验收要求，历史复现不表示原始缺陷仍全部存在。最新结论以本表、各项状态和文末“首轮修复后复审”记录为准。“可关闭”仅指本轮检查范围内的修复通过，不代表公开发布已获批准。
+以下各项保留首轮问题描述和验收要求，历史复现不表示原始缺陷仍全部存在。最新结论以本表和文末最新状态记录为准。“暂时完成，下次检查”表示当前工作在此处停留，不代表公开发布已获批准。
 
 ## 执行约束与完成标准
 
@@ -31,7 +32,7 @@
 - 最终执行 `pnpm run release:verify`。仅单独执行 smoke 脚本成功，不等于正式发布入口通过。
 - 完成后交回复审，由产品/发布负责人另行作出发布决策。
 
-下一轮建议顺序：对 ALS-CR-002、ALS-CR-006、ALS-CR-007 进行二次复审。保留已通过项的修复与测试；每项新增修改均应有独立可追溯的修复与验证记录。
+后续对直接修复及新增错误处理边界进行最终复核，保留已通过六项的修复与测试；不移除 private 标志或自动发布。
 
 ## ALS-CR-001 — P1：状态重建允许原型污染
 
@@ -58,7 +59,7 @@
 
 ## ALS-CR-002 — P1：Checkpoint 绕过脱敏流水线
 
-状态：已补充修复，待二次复审（P1）。原始明文落盘问题已改善；本轮补充默认 reference 脱敏状态一致性、重复 checkpoint 与实际 Mock Replay 回归，详见文末复审补充及第二次交付记录。
+状态：暂时完成，下次检查（2026-09-08）。此前修复、测试和兼容边界记录保留；最近复查发现的待处理边界见文末最新状态记录。
 
 **位置**：`packages/recorder/src/index.ts:392`，`Recorder.checkpoint()`；关联 `packages/recorder/src/redaction.ts` 的 `RedactionPipeline.asInterceptor()` 和 `packages/recorder/src/writer.ts` 的 `SnapshotWriter.asInterceptor()`。
 
@@ -156,7 +157,7 @@
 
 ## ALS-CR-006 — P2：编译器丢失跨中间事件的因果依赖
 
-状态：已补充修复，待二次复审（P2）。祖先回溯已改为显式栈；真实 Recorder 写盘、重新加载后的 8,000 个合法中间事件长链可完成编译，B 正确依赖 A，详见文末复审补充和第二次交付记录。
+状态：二次复审通过，可关闭（2026-09-08）。显式栈遍历及 8,000 个合法中间事件长链回归通过，B 正确依赖 A；本轮未发现相关回归。
 
 **位置**：`packages/replay/src/compiler.ts:179`，`requestParentDependencies()`；关联 `sourceNodeByEventId` 的构建。
 
@@ -179,7 +180,7 @@
 
 ## ALS-CR-007 — P2：正式发布门禁无法启动独立版 pnpm
 
-状态：已补充修复，待二次复审（P2）。Windows command launcher 现在将启动器和参数编码为一个正确引用的 `cmd.exe /d /s /c` 命令，并仅为该分支启用原样参数传递；真实含空格 `.cmd` 启动器与参数回归通过，详见文末复审补充和第二次交付记录。
+状态：二次复审通过，可关闭（2026-09-08）。含空格 `.cmd` 路径可实际启动；真实子进程回归和锁定版本下的正式 release:verify 通过，本轮未发现相关回归。
 
 **位置**：`scripts/release-smoke.js:12` 至 `:23`，`pnpmCommand` 与 `runPnpm()`。
 
@@ -310,7 +311,9 @@
 - ALS-CR-001、003、004、005 在本轮检查范围内可关闭。
 - ALS-CR-002、006、007 保持未关闭；建议完成补充修复及回归测试后再次复审，暂缓公开发布。
 
-## 第二次修复交付记录（待 coding agent 填写）
+## 第二次修复交付记录（coding agent 原始报告，历史）
+
+以下保留第二次交付时的状态和验证结果；当前结论见文首状态表及随后的二次复审记录。
 
 | 编号 | 当前状态 | 新增修改文件/提交 | 补充回归测试与验证结果 |
 | --- | --- | --- | --- |
@@ -318,4 +321,297 @@
 | ALS-CR-006 | 已补充修复，待二次复审 | `packages/replay/src/compiler.ts`、`packages/replay/src/index.test.ts` | 将祖先回溯从同步递归改为显式栈，保留每个请求的 visited 去重、已映射节点停止回溯、自依赖排除和依赖稳定排序。真实 Recorder 写盘/重新加载回归构造 8,000 个 `decision.recorded` 中间事件，断言 B 依赖 A 且 Workflow IR 校验通过；短链、并行、汇合和重试合并回归继续通过；`pnpm run release:verify` 通过（101 passed，0 skipped）。 |
 | ALS-CR-007 | 已补充修复，待二次复审 | `scripts/release-smoke.js`、`scripts/release-smoke.test.js` | Windows command launcher 由专用引用函数构造单个 `cmd.exe /d /s /c` 命令，并配合 `windowsVerbatimArguments` 保留其边界；JS、原生可执行文件及缺失 `npm_execpath` 分支继续按参数数组调用。真实子进程回归在含空格临时目录创建可控 `.cmd`，断言退出成功且收到含空格参数；`pnpm run release:verify` 通过（102 passed，0 skipped）。 |
 
-下一轮正式门禁命令、环境、结果及残留问题：Node.js 24.20.0、pnpm 11.19.0；`pnpm run release:verify` 通过（102 passed，0 skipped），已执行质量门禁、打包检查与临时消费者的 validate、graph、Mock Replay。残留问题：ALS-CR-002、ALS-CR-006、ALS-CR-007 均待二次复审。完成后应同步更新文首状态表和各项状态，保留历史记录。
+第二次交付者报告（复审前）：Node.js 24.20.0、pnpm 11.19.0；`pnpm run release:verify` 通过（102 passed，0 skipped），已执行质量门禁、打包检查与临时消费者的 validate、graph、Mock Replay。交付时 ALS-CR-002、ALS-CR-006、ALS-CR-007 均待二次复审；该历史状态已由以下复审结论更新。
+
+## 第二次修复后复审（2026-09-08）
+
+范围：对提交 `a09106a` 中 ALS-CR-002、006、007 的二次修复及新增测试进行复核，重跑正式发布门禁并补充独立复现。复审期间工作区干净，未修改产品代码。
+
+### ALS-CR-002 剩余问题 — P1：跨脱敏类别仍产生不同状态
+
+**位置**：`packages/recorder/src/redaction.ts:646` 至 `:652`，`RedactionPipeline.placeholderFor()`；关联 `redactEvent()`、`redactCheckpoint()` 和默认字段/正则规则。
+
+**原因与影响**：reference 缓存键包含类别和原始值，只有两者都相同才复用占位符。状态变更事件的值位于 payload.value，默认正则将测试密钥归为 api_key；checkpoint 的同一值若位于 token 或 password 字段，则优先命中相应字段规则，类别成为 token 或 password。即使原始值相同，也会生成不同占位符，导致两种恢复路径状态哈希不同。
+
+**独立复现结果**：
+
+| 状态路径 | 事件流占位符类别 | Checkpoint 占位符类别 | 状态哈希一致 |
+| --- | --- | --- | --- |
+| /value | api_key | api_key | 是 |
+| /token | api_key | token | 否 |
+| /password | api_key | password | 否 |
+
+各场景均使用未定制的 `createDefaultRedactionPipeline()`，原始值为人工测试字符串 `sk-reviewsecret123456789`。占位符具体 UUID 无关紧要，关键是类别和引用身份均不一致。
+
+**端到端复现步骤**：
+
+1. 配置默认 pipeline 和真实 SnapshotWriter，创建运行。
+2. 追加 `state.changed`，payload 为 `{ operation: 'set', path: '/token', value: 'sk-reviewsecret123456789' }`。
+3. 调用 checkpoint，state 为 `{ token: 'sk-reviewsecret123456789' }`，传入该原始 state 的哈希。
+4. 以返回的 checkpoint.state_hash 完成运行，提交并关闭 writer。
+5. 使用 loadTraceSnapshot 重新加载磁盘快照，并用新 Recorder 执行 MockReplayRunner。
+6. 实际结果：源 Trace `valid=true`，回放 `status=failed`，诊断为 `FINAL_STATE_MISMATCH`。
+
+**现有测试缺口**：新增默认 pipeline 端到端测试仅使用 /value 和 /api_key，这两个路径的事件与 checkpoint 恰好都使用 api_key 类别，未覆盖跨类别情况。
+
+**后续修复要求**：保证同一逻辑状态在事件流和 checkpoint 两条路径中形成一致的脱敏表示，不能仅保证“相同类别 + 相同值”的缓存复用。应明确字段规则与正则规则的组合语义，保留密钥不落盘、已脱敏状态稳定及原有定制规则支持；不得通过取消脱敏或一致性比较绕过问题。
+
+**第三次修复验收**：
+
+- 默认 pipeline 下，至少覆盖 /value、/api_key、/token、/password 的状态更新，分别断言事件流和 checkpoint 重建状态及哈希一致。
+- /token、/password 必须经过真实写盘、重新加载和 Mock Replay，断言正常完成，无 `FINAL_STATE_MISMATCH`。
+- 保留重复原始 checkpoint、已脱敏 checkpoint、原始密钥不落盘及自定义 mask/remove 等已有回归。
+- 正式 `pnpm run release:verify` 继续通过；新增跨类别测试必须纳入该门禁。
+
+### 可关闭项及门禁结果
+
+- ALS-CR-006：显式栈祖先遍历与 8,000 个中间事件长链回归通过，可关闭。
+- ALS-CR-007：通过生产调用组合逻辑实际执行 `C:/Program Files/nodejs/pnpm.cmd --version`，退出码为 0，输出 11.19.0；含空格路径真实子进程测试及正式门禁通过，可关闭。
+- ALS-CR-001、003、004、005：本轮未发现相关回归，维持可关闭状态。
+- 正式 `pnpm run release:verify` 在 Node.js 24.20.0、pnpm 11.19.0 下通过，包括质量检查、测试、打包和临时消费者安装 smoke；仍未覆盖上述剩余失败场景。
+- 发布结论：六项可关闭，一项 P1 未通过。继续暂缓公开发布，完成 ALS-CR-002 补充修复后再次复审。
+
+## 第三次修复交付记录（coding agent 原始报告，历史）
+
+以下保留第三次交付时的报告和“待三次复审”状态；当前结论由随后的三次复审记录更新。
+
+| 编号 | 当前状态 | 新增修改文件/提交 | 补充回归测试与验证结果 |
+| --- | --- | --- | --- |
+| ALS-CR-002 | 已补充修复，待三次复审 | `packages/recorder/src/redaction.ts`、`packages/replay/src/index.test.ts` | reference 身份缓存改为仅以原始 JSON 值为键；同一值即使由字段规则和正则规则归入不同类别，也会复用同一个占位符，避免事件流与 checkpoint 状态分裂。默认 pipeline 真实写盘、重新加载与 Mock Replay 回归逐一覆盖 /value、/api_key、/token、/password，并保留重复原始 checkpoint、已脱敏 checkpoint 与密钥不落盘断言；`pnpm run release:verify` 通过（102 passed，0 skipped）。 |
+
+第三次交付者报告（复审前）：Node.js 24.20.0、pnpm 11.19.0；`pnpm run release:verify` 通过（102 passed，0 skipped），已执行质量门禁、打包检查与临时消费者的 validate、graph、Mock Replay。交付时 ALS-CR-002 待三次复审；最新结论见下文。
+
+## 第三次修复后复审（2026-09-08）
+
+范围：复核 ALS-CR-002 最新代码及回归测试，独立验证上轮样例和未被正则完整匹配的状态值，执行真实写盘、恢复与回放。复审未修改产品代码。
+
+### ALS-CR-002 剩余问题 — P1：字段规则与逻辑状态路径不一致
+
+**位置**：`packages/recorder/src/redaction.ts:662` 至 `:666`，`RedactionPipeline.redactEvent()`；关联 `redactCheckpoint()` 的字段规则应用。
+
+**原因与影响**：事件脱敏直接处理 payload，字段规则看到的是 `/value`，而非 `state.changed.path` 指定的逻辑字段。checkpoint 直接处理 state，可以命中 `/password`、`/token` 等规则。仅将 reference 缓存改为以原始 JSON 值为键，不能解决两处匹配范围不同的问题：未命中正则时事件不脱敏；部分命中时事件仅替换子串，checkpoint 却替换整个字段。
+
+**独立验证结果**：
+
+| 逻辑路径 | 人工测试值 | 事件流行为 | Checkpoint 行为 | 结果 |
+| --- | --- | --- | --- | --- |
+| /token | `sk-reviewsecret123456789` | 替换完整正则匹配值 | 复用同一 reference | 状态哈希一致，上轮样例已修复 |
+| /password | `review-only-opaque-password` | 原样保留密码 | 替换整个字段 | 明文落盘且状态哈希不一致 |
+| /token | `prefix sk-reviewsecret123456789` | 保留前缀，仅替换 API-key 子串 | 替换整个字段 | 状态哈希不一致 |
+
+上述字符串均为人工测试值，不是真实凭据。
+
+**实际写盘与回放复现步骤**：
+
+1. 对表中后两种场景分别创建新运行，配置未定制的默认 pipeline 和 SnapshotWriter。
+2. 追加 `state.changed`，payload 为 `{ operation: 'set', path: '/password', value: 'review-only-opaque-password' }`；另一场景将 path 改为 `/token`、value 改为带前缀的测试值。
+3. 以对应原始 state 和哈希创建 checkpoint，再使用返回的 checkpoint.state_hash 完成运行，提交并关闭 writer。
+4. 检查磁盘 `events.jsonl`，普通密码场景仍能找到完整原始测试值。
+5. 重新调用 loadTraceSnapshot，再使用新 Recorder 执行 MockReplayRunner。
+6. 两种场景均为源 Trace `valid=true`、回放 `status=failed`，诊断均为 `FINAL_STATE_MISMATCH`。
+
+**现有测试缺口**：第三次交付测试虽遍历 /value、/api_key、/token、/password，却始终使用完整匹配 API-key 正则的同一个字符串。它证明了整值命中时的 reference 复用，没有覆盖字段规则独立命中和正则仅匹配子串的情况。
+
+**后续修复要求**：
+
+- 统一事件增量与 checkpoint 的逻辑状态路径脱敏语义；state.changed 的目标字段必须参与规则匹配，不能仅依赖事件包装中的 payload.value 路径或密钥格式。
+- 保证同一逻辑状态值在两条恢复路径中形成相同表示，处理字段规则整值替换与正则子串替换的关系。
+- 保留现有非状态事件的规则语义、自定义规则以及已脱敏占位符稳定性；不得通过保留明文、取消脱敏或关闭状态一致性校验使回放通过。
+
+**第四次修复验收**：
+
+- 默认 pipeline 下，普通密码和不匹配密钥正则的 token 在对应敏感逻辑字段中不得明文落入事件或 checkpoint。
+- 对普通密码、完整 API-key 字符串、带前缀密钥分别进行真实写盘、重新加载、事件流/checkpoint 双路径恢复和 Mock Replay；断言状态及哈希一致、回放成功且无 FINAL_STATE_MISMATCH。
+- 补充逻辑路径相关的嵌套状态、JSON Pointer 转义和 set/merge/append 等适用增量操作测试，防止仅针对顶层 set 样例修补。
+- 保留重复原始 checkpoint、已脱敏 checkpoint、自定义 mask/remove、artifact 边界及其余六项已通过的回归测试。
+- 新增用例必须纳入正式 `pnpm run release:verify`，最终门禁继续通过。
+
+### 三次复审验证与发布结论
+
+- Node.js 24.20.0、pnpm 11.19.0 下，正式 `pnpm run release:verify` 通过，含质量检查、测试、打包及临时消费者安装 smoke。
+- 上轮完整 API-key 字符串的跨类别问题已改善；本轮两个补充失败场景均通过实际文件和 Mock Replay 独立复现，现有门禁未覆盖。
+- ALS-CR-002 保持 P1 未关闭；其余六项维持可关闭状态。建议继续暂缓发布，完成逻辑状态路径脱敏修复后再次复审。
+
+## 第四次修复交付记录（coding agent 原始报告，历史）
+
+| 编号 | 当前状态 | 新增修改文件/提交 | 补充回归测试与验证结果 |
+| --- | --- | --- | --- |
+| ALS-CR-002 | 已补充修复，待四次复审 | `packages/recorder/src/redaction.ts`、`packages/recorder/src/redaction.test.ts`、`packages/replay/src/index.test.ts` | state.changed 会将增量 value 投影至其逻辑 path 后执行字段、正则和自定义规则，再写回事件，保证与 checkpoint 的整值/子串脱敏粒度一致；artifact 引用和非状态事件边界保持不变。默认 pipeline 真实写盘、重新加载和 Mock Replay 覆盖普通密码、完整 API-key、带前缀密钥并断言密钥不落盘；逻辑路径回归覆盖嵌套、JSON Pointer 转义、set、merge、append、通配符与自定义规则；`pnpm run release:verify` 通过（103 passed，0 skipped）。 |
+
+第四次交付者报告（复审前）：Node.js 24.20.0、pnpm 11.19.0；`pnpm run release:verify` 通过（103 passed，0 skipped），已执行质量门禁、打包检查与临时消费者的 validate、graph、Mock Replay。交付时 ALS-CR-002 待四次复审；以下为后续发现和修复记录。
+
+## 第四次复审后的直接修复（2026-09-08）
+
+用户授权直接修复四次复审中的两处问题：
+
+1. `/password` 的 remove 规则删除目标后，投影查找返回 undefined，原逻辑回退到普通 payload 脱敏，导致原始密码落入 events.jsonl。
+2. 对 `/tokens/1` 配置 mask，先 set tokens 为 `['public']` 再 append 测试值，虚拟数组下标始终为 0，导致新增值未脱敏；checkpoint 按真实下标脱敏后与事件状态分裂。
+
+两者修复前均已实际写盘复现：原始测试值存在于事件文件、Trace valid=true、Mock Replay 报 FINAL_STATE_MISMATCH。
+
+### 实现与兼容边界
+
+- `STATE_REDACTION_UNREPRESENTABLE`：整个变更目标被删除、祖先被替换导致目标不可取出，或 append 容器不再是数组时，直接抛出错误，不回退原始值。
+- `STATE_REDACTION_CONTEXT_REQUIRED`：append 或 trailing `/-` 写入遇到指定新增元素下标的字段规则、或重叠的自定义回调时，拒绝在未知真实位置上执行规则。自定义回调可依赖 context.path 中的具体下标，因此同样需要完整上下文。
+- 错误由 RedactionPipeline 在持久化前返回；在 pipeline → SnapshotWriter 的配置下，不写入被拒绝事件，不推进 Recorder 的事件序列，错误文本不包含原始测试值。
+- 对可表达的父对象/数组，调用方可改用完整更新后的 `set`，再应用相同规则。完整父对象内删除嵌套字段、完整数组的指定下标脱敏均可保持状态与 checkpoint 一致。
+- 无法用当前协议表达的整个目标删除不会被伪装为成功；调用方必须处理错误。没有新增空操作事件或更改快照协议。位置无关的字段通配符 append 仍可使用。
+- 使用说明见 `docs/security-and-release.md` 的 Secrets 段。此限制是有意的安全失败行为，不能通过移除脱敏拦截器重试。
+
+### 新增验证
+
+- 单元回归：字段 remove、自定义 remove、祖先替换均不回退敏感值；指定下标 append、`set /tokens/-`、依赖路径的自定义回调在持久化前拒绝。
+- 真实写盘回归：断言失败调用不改变内存事件、不将测试密钥写入 JSONL；改用完整父对象/数组 set 后，事件流与 checkpoint 恢复状态及哈希一致，Mock Replay 成功，事件及 checkpoint 中均无原始测试值。
+- 保留普通密码、完整及带前缀密钥、/value、/api_key、重复 checkpoint、已脱敏 checkpoint、嵌套/转义路径、merge、通配符 append 和此前六项的回归。
+- 修改文件：`packages/recorder/src/redaction.ts`、`packages/recorder/src/redaction.test.ts`、`packages/replay/src/index.test.ts`、`docs/security-and-release.md` 及本文。
+
+验证结果：定向测试 35 passed；Node.js 24.20.0、pnpm 11.19.0 下正式 `pnpm run release:verify` 通过，106 passed、0 failed、0 skipped，包含类型检查、lint、格式、打包及临时消费者 validate、graph、Mock Replay。产品包的 private 标志、scope、registry 和发布凭据未修改，未执行发布。
+
+## 最新复审与 merge 补充修复（2026-09-08）
+
+最新复审仍发现 ALS-CR-002 的 P1 遗漏：对 `/profile` 整体 mask 后，合法的对象 merge 被改为字符串值，但操作仍为 merge。事件会被接受并落盘，真实 Mock Replay 抛出 `STATE_VALUE_INVALID`；当时正式门禁通过，但未覆盖此分支。
+
+按用户授权补充修复：
+
+- `redactStateChangeValue()` 在返回前检查 merge 的脱敏结果。非对象值（包括数组、null、字符串、数字和布尔值）以 `STATE_REDACTION_UNREPRESENTABLE` 在持久化前拒绝，不改变操作类型或回退原值。
+- 调用方可改用完整更新后的目标值执行 set；不能仅把原 merge 补丁改名为 set，否则会覆盖原有字段。脱敏结果仍为对象的 merge 保持支持。
+- 单元回归覆盖 mask、reference、自定义非对象替换和合法对象替换；错误文本不包含原始测试密钥。
+- 真实写盘回归覆盖 mask 与 reference：拒绝后内存事件及 JSONL 文件逐字不变，后续安全 set 的序列连续；重新加载后事件流和 checkpoint 的恢复状态与哈希一致，Mock Replay 完成，事件及 checkpoint 无原始测试密钥。
+
+验证：新增两个测试在修复前均报 `Missing expected rejection`；修复后 recorder redaction 与 replay 定向测试 37 passed、0 failed、0 skipped。正式 `pnpm run release:verify` 通过，包含类型检查、lint、格式、全量测试、打包检查及临时消费者安装后的 validate、graph、Mock Replay；`git diff --check` 通过。
+
+修改文件为 redaction 实现及单元测试、replay 集成测试、安全指南和本文。ALS-CR-002 状态为已补充修复、待再次复审，不等于已批准发布；未提交、未发布，未修改 private、scope 或 registry。
+
+## 最新复审与 delete 补充修复（2026-09-08）
+
+最新复审确认 merge 修复通过，但 delete 未带 value 时绕过逻辑状态脱敏，带 value 时也被明确跳过。独立复现：
+
+- `/profile/password` 配置 remove，先 set 完整 profile 再 delete password，事件落盘且 Trace valid=true，但 Mock Replay 抛出 `STATE_EVENT_INVALID`，因为脱敏状态中目标已不存在；该场景未泄露原始密钥。
+- `/tokens/0` 配置 remove，先 set `['hidden', 'public', 'keep']` 再 delete `/tokens/1`，事件恢复为 `['public']`，checkpoint 为 `['keep']`。
+
+按用户授权补充修复：
+
+- delete 无论是否附带 value 均进入检查，安全事件保留原 payload，不人为添加 value。
+- 目标可能被 remove 或祖先被 mask/reference/remove 时，返回 `STATE_REDACTION_UNREPRESENTABLE`。
+- 数组元素 remove 可能改变寻址、数组删除影响固定下标字段规则、或相关自定义规则需要上下文时，返回 `STATE_REDACTION_CONTEXT_REQUIRED`。检查涵盖嵌套数组、通配符、转义路径和全局自定义规则。数字对象键在缺少容器状态时保守地视为可能的数组下标。
+- 保留普通对象字段删除、精确 mask/reference 字段删除、整父对象删除（含已移除子字段）和位置无关的通配符数组删除；无关路径规则不阻止普通对象删除。不能安全表达时，需以完整更新后的父对象/数组 set 重试，不可跳过错误或将所有缺失删除改成 no-op。
+
+回归验证：新增拒绝单元测试及真实写盘测试在修复前均报 `Missing expected rejection`。修复后覆盖对象 remove、数组 remove、固定下标 mask、自定义 remove 四种实际落盘流程，拒绝后内存事件和 JSONL 逐字不变、后续序列连续；完整 set 重试后事件与 checkpoint 的恢复状态/哈希一致，Mock Replay 完成且原始测试密钥不落盘。
+
+验证结果：redaction 与 replay 定向测试 40 项通过；最终 delete 定向测试 3 项通过；正式 `pnpm run release:verify` 111 passed、0 failed、0 skipped，类型检查、lint、格式检查、打包及临时消费者 validate、graph、Mock Replay 全部通过；`git diff --check` 通过。
+
+修改文件：redaction 实现、redaction 单元测试、replay 集成测试、安全指南及本文。ALS-CR-002 保持“已补充修复，待再次复审”，未提交、未发布，未修改 private、scope 或 registry。
+
+## 最新复审与控制字段补充修复（2026-09-08）
+
+最新复审确认 delete 修复通过，但逻辑规则 `/path`、`/operation` 同时作用于事件 metadata，会破坏协议控制。实际复现：`set /path` 的 path 被 mask 成占位符，事件成功落盘且 Trace valid=true，但 Mock Replay 抛出 `STATE_EVENT_INVALID`；该场景未泄露原始测试密钥。
+
+按用户授权补充修复：
+
+- 从待脱敏 metadata 中分离 operation/path，逻辑字段和自定义规则仅处理状态数据及扩展 metadata；输出时恢复精确的原控制字段。状态本身名为 path/operation 的字段仍正常脱敏。
+- set、merge、append、delete 共用此隔离逻辑；delete 不人为增加 value，附带 value 和 artifact 引用仍在各自既有脱敏边界内处理。
+- 如正则规则要求修改控制字段，拒绝并返回 `STATE_REDACTION_UNREPRESENTABLE`，提示使用非敏感状态路径，不静默改坏指针或保留正则命中的明文。
+- 无法投影的状态增量、metadata 被替换成非对象时明确拒绝，不回退对原 payload 的通用处理。
+
+验证：新增真实写盘回归在修复前因 operation 从 set 变为占位符而失败。修复后 mask/reference 两组均覆盖 set、merge、append、delete、扩展字段脱敏、无 value 删除；控制字段保持原值，事件与 checkpoint 状态/哈希一致，Mock Replay 完成，原始测试密钥未落盘。单元回归另覆盖自定义同名规则、artifact/可选 delete value 的控制字段保留、正则命中控制字段及非对象 metadata 拒绝。
+
+最终 `pnpm run release:verify`：115 passed、0 failed、0 skipped，类型检查、lint、格式、打包及临时消费者安装后的 validate、graph、Mock Replay 全部通过。`git diff --check` 通过。安全指南与本记录已同步；ALS-CR-002 状态为已补充修复、待再次复审，未提交、未发布。
+
+## 最新复审与自定义上下文补充修复（2026-09-08）
+
+最新复审确认控制字段隔离通过，但自定义回调只接收当前增量的投影，无法读取已有状态。实际写盘复现：`/profile` 回调在 `private: true` 时删除 `label`；先完整 set `{ private: true }`，再 merge `{ label: 'review-only-secret' }`，回调看不到既有 private 标记，原值进入 `events.jsonl`。checkpoint 正确删除 label，Trace valid=true，而 Mock Replay 以 `FINAL_STATE_MISMATCH` 失败；局部 set `/profile/label` 同样可泄露。
+
+按用户授权补充修复：
+
+- 增量写盘前分析自定义规则与目标 JSON Pointer 的关系。merge 落在自定义规则目标或其后代、set 落在自定义规则目标之下时，返回 `STATE_REDACTION_CONTEXT_REQUIRED`，不调用带有合成部分对象的回调。
+- 无 path 的全局自定义规则始终拒绝状态增量：协议无法表达完整根状态 set。append 及 trailing `/-` 的既有自定义上下文保护保持不变；delete 使用已有状态/下标检查。
+- set 在自定义规则的完整目标上、以及 merge 包含完整的 scoped descendant 值仍可用。完整更新后的父对象可作为被拒绝 merge 或局部 set 的安全替代路径。
+
+回归验证：新增单元测试覆盖精确 custom merge、局部 custom descendant set、全局 custom、完整 parent set 以及可安全的 scoped descendant merge。新增真实写盘测试先断言 merge 与局部 set 均在写盘前拒绝，内存事件和 JSONL 不变；随后完整 `/profile` set 成功，事件和 checkpoint 恢复状态/哈希一致，Mock Replay 完成，事件和 checkpoint 均不含原始测试密钥。
+
+验证结果：recorder redaction 与 replay 定向测试 46 passed、0 failed、0 skipped；正式 `pnpm run release:verify` 117 passed、0 failed、0 skipped，类型检查、lint、格式检查、打包及临时消费者安装后的 validate、graph、Mock Replay 全部通过；`git diff --check` 通过。修改文件：redaction 实现与单元测试、replay 集成测试、安全指南及本文。ALS-CR-002 保持“已补充修复，待再次复审”，未提交、未发布。
+
+## 结构变更修复与自复审（2026-09-08）
+
+用户要求修复最新两项发现，并在修复后自行复审。修复前已通过真实快照独立复现：
+
+1. `/profile/contact` 自定义回调删除 contact 后，merge 补丁变为 `{}`，旧 contact 留在恢复状态中，checkpoint 则不含该字段。
+2. `/items/*` 回调删除第 0 个元素后，`set /items/1` 仍使用原下标，恢复结果多出旧元素，checkpoint 只有更新后的元素。
+
+两者均成功落盘、Trace valid=true，Mock Replay 报 `FINAL_STATE_MISMATCH`；对应测试密钥未落盘。新增写盘回归在生产修复前以 `Missing expected rejection` 复现 merge 问题。
+
+### 修复行为
+
+- 比较规范化的原 merge 补丁与脱敏结果的顶层键。任何顶层键被移除时返回 `STATE_REDACTION_UNREPRESENTABLE`，因为浅合并无法用省略键删除旧值。保留对子对象完整替换时的嵌套删除，以及未丢键的合法 merge。
+- 所有状态操作在处理值之前检查路径中的数字段。元素级 remove、自定义元素规则或祖先规则可能压缩/替换数组时，返回 `STATE_REDACTION_CONTEXT_REQUIRED`。覆盖固定下标、通配符、嵌套数组、转义路径，以及元素内部的 merge/append。
+- 地址检查位于 inline/artifact 值分流之前。缺少容器状态时，数字对象键按可能的数组下标保守处理；完整父对象或数组 set 仍可用。不会自动修改操作类型、猜测新下标或添加 no-op。
+
+### 自复审及验证
+
+- 自复审重新核对浅合并语义、数组压缩后的寻址、各操作入口与 artifact 分流，发现 artifact 引用可绕过值处理内部的地址检查；新增回归复现后，将检查前移。随后又以整数组过滤回调复核 ancestor 规则，修复同类入口。两项补充回归均先失败后通过。
+- 新增真实写盘测试覆盖 6 个场景：merge 移除已有子字段、数组 set/merge/嵌套 append，以及元素级/整数组过滤后的 artifact 引用更新。断言拒绝后内存事件和 JSONL 不变、重试序列连续；完整父对象/数组 set 后，恢复状态和 checkpoint 哈希一致，Mock Replay 完成且测试密钥不落盘。
+- 新增 525 组确定性组合检查，覆盖对象、数组、嵌套转义路径、mask/reference/remove、自定义条件删除与顺序组合规则。以未脱敏事件恢复的完整状态独立计算预期脱敏结果，所有获准增量均与该结果及其哈希一致；同时保留合法更新与拒绝路径，防止通过全面禁用操作掩盖问题。
+- 最终代码的 redaction 与 replay 定向测试 48 passed、0 failed、0 skipped；正式 `pnpm run release:verify` 119 passed、0 failed、0 skipped，类型检查、lint、格式、打包及临时消费者安装后的 validate、graph、Mock Replay 全部通过。`git diff --check` 通过，HEAD 仍为 `a09106a`。
+
+自复审结论：当前检查范围内未发现新的阻断项；ALS-CR-002 在安全指南记录的兼容边界内可关闭。其余六项维持此前结论。修复、自复审与发布批准分开记录，未提交、未发布。
+
+## 数字对象键补充修复（2026-09-08）
+
+后续复审发现 P2 问题：`virtualStateContainer` 将数字 JSON Pointer 段构造成稀疏数组。合法对象键 `1000000` 的小更新产生约 8 MB 堆分配，`4294967295` 等大键则无法提取投影目标，错误返回 `STATE_REDACTION_UNREPRESENTABLE`。
+
+按用户授权修复：虚拟祖先使用单个自有字符串属性，保留数字键原文，不做数字转换、不分配与键值大小相关的数组空间。实际传入的数组及 trailing `/-` 追加保持原语义；已有上下文及数组地址安全检查不放宽。
+
+验证证据：
+
+- 新增单元与真实写盘回归均在修复前失败、修复后通过。覆盖 `4294967295`、超过安全整数的 `9007199254740993`、80 位数字键，以及真实数组下标和追加操作。
+- 独立子进程内存回归约束 `1000000` 小更新的堆增量低于 2 MiB；修复后独立探测约 36 KB。该数值为本机探测结果，不作为通用性能保证。
+- 写盘回归覆盖 set、merge、append、delete、reference 与 mask；事件恢复和 checkpoint 状态及哈希一致，Mock Replay 完成，测试密钥未落盘。原有 525 组状态等价检查继续通过。
+- redaction 与 replay 定向测试 50 passed、0 failed、0 skipped；正式 `pnpm run release:verify` 121 passed、0 failed、0 skipped，包含类型检查、lint、格式、全套测试、打包及临时消费者安装后的 validate、graph、Mock Replay。另一次沙箱内 `pnpm test` 为 120 passed、0 failed、1 skipped；最终以正式发布验证的零跳过结果为准。`git diff --check` 通过。
+
+安全指南已同步。当前修复范围内未发现新的阻断项；未提交、未发布，发布决策仍由负责人作出。
+
+## 短横线对象键补充修复（2026-09-08）
+
+后续复审发现 P1：对象 `set /byId/-` 被投影为数组追加，精确规则 `/byId/-/password` 未匹配。实际写盘确认测试明文进入事件文件，checkpoint 正确脱敏，Trace valid=true 而 Mock Replay 报 `FINAL_STATE_MISMATCH`。
+
+按用户授权修复：
+
+- 虚拟祖先统一保留原字符串键，包括路径中间的 `-`；merge/append 的末尾 `-` 不再误判为追加标记。
+- 仅 set 的末尾 `-` 保留数组追加候选语义。若字段规则在该位置指定精确 `-`，因缺少父容器类型，在 inline/artifact 分流前返回 `STATE_REDACTION_CONTEXT_REQUIRED`，提示完整父对象 set；不会只选择一种解释而漏脱敏。已有固定下标、自定义回调及结构变更检查保持不变。
+- 位置无关的通配符规则继续支持合法对象 `-` 键和真实数组追加。
+
+回归与核对：新单元测试在修复前以 `Missing expected rejection` 失败；修复后验证精确规则拒绝、merge `-` 目标、局部 set 及嵌套 append。真实写盘测试增加精确 `-` 规则，断言拒绝前后内存事件及 JSONL 不变，完整父对象重试后可继续更新；另将 `-` 纳入通配符对象键场景。事件与 checkpoint 恢复状态/哈希一致，Mock Replay 完成，测试明文不落盘。复核保留真实数组下标与追加覆盖。
+
+验证结果：定向测试 51 passed、0 failed、0 skipped；正式 `pnpm run release:verify` 122 passed、0 failed、0 skipped，类型检查、lint、格式、打包及临时消费者 validate、graph、Mock Replay 全部通过。`git diff --check` 通过。安全指南已同步，未提交、未发布。
+
+## 整体复审问题集中修复（2026-09-08）
+
+整体检查覆盖输入规范化、字段/正则/自定义规则、set/merge/delete/append、JSONL 写盘失败边界、checkpoint、Trace 加载和 Mock Replay。检查发现并按用户授权集中修复以下四项：
+
+1. 生命周期和回放协议字段会被同名字段规则改写，导致 checkpoint 或终态事件不再符合 schema。
+2. reference 缓存键使用对象插入顺序，原始状态哈希相同的换序对象可得到不同占位符，导致最终状态哈希不一致。
+3. 数组元素被字段或自定义规则移除时，移除分支遗漏 `security.redactions` 审计条目。
+4. append 的虚拟投影总使用下标 0，审计记录可能错误声称脱敏发生在既有第 0 个元素。
+
+修复行为：
+
+- 对 run、model、tool、checkpoint 和 verification 的协议字段按事件类型隔离；精确字段规则不会重写协议值，替换协议容器或正则命中协议值则在写盘前返回 `PROTOCOL_REDACTION_UNREPRESENTABLE`。错误消息/details、输入、输出和诊断仍在正常脱敏范围内。
+- reference 以递归、键排序的规范 JSON 身份缓存；对象键顺序不影响占位符，数组顺序仍是身份的一部分，与 `hashState()` 语义一致。
+- 数组删除先保留对应审计条目；append 与 trailing `/-` 的审计条目将虚拟 `/0` 映射为协议路径 `/-`。
+
+验证：新增单元测试先覆盖 checkpoint/run.failed 协议控制、规范 reference、字段与 scoped custom 的数组删除、append 和 trailing `/-` 审计路径。新增真实写盘回归同时在状态中使用 `state_hash`、`final_state_hash`、`sequence`、`checkpoint_id`、`last_event_id` 等合法同名字段，并让 event/checkpoint 的 profile 对象仅键顺序不同；断言 Trace valid、事件恢复与 checkpoint 状态/哈希一致、控制字段类型/格式保持有效、测试密钥不落盘、Mock Replay 完成。
+
+整体组合核对：9,598 组状态变更/规则组合中，6,357 组获准更新均与完整状态脱敏后的 checkpoint 一致，3,241 组按既有安全边界拒绝；换序对象检查暴露的 356 组 reference 不一致已由规范身份修复。该组合检查保留数组、对象、转义键、数字/短横线键、mask/reference/remove、自定义规则及规则组合。
+
+最终验证：redaction 与 replay 定向测试 54 passed、0 failed、0 skipped；正式 `pnpm run release:verify` 125 passed、0 failed、0 skipped，包含类型检查、lint、格式、全套测试、打包和临时消费者的 validate、graph、Mock Replay。`git diff --check` 通过。安全指南已同步，未提交、未发布。
+
+## ALS-CR-002 当前状态（2026-09-08）
+
+按用户要求，ALS-CR-002 标记为“暂时完成，下次检查”。本次不继续修复或发布。
+
+下次检查优先复核两项已复现边界：
+
+- 全局 custom redactor 依赖 `error.code` 等协议字段作判断时，协议隔离不能令其丢失脱敏上下文或使敏感 error message 落盘。
+- 脱敏流水线必须把任意扩展事件类型视为普通不可信字符串；`constructor`、`toString` 等名称不得触发继承属性并抛出内部异常。
+
+此前的代码、测试、安全指南和验证记录保持现状；未提交、未发布。

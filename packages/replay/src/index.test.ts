@@ -8,13 +8,20 @@ import { fileURLToPath } from 'node:url';
 import { ArtifactReadError, loadTraceSnapshot } from '@agent-loop-snapshot/trace';
 import {
   SnapshotWriter,
+  RedactionPipeline,
+  RedactionError,
   createDefaultRedactionPipeline,
   hashState,
   Recorder,
   reconstructState,
   type RunHandle,
 } from '@agent-loop-snapshot/recorder';
-import { validateWorkflow, type EventId, type WorkflowDocument } from '@agent-loop-snapshot/schema';
+import {
+  validateWorkflow,
+  type EventId,
+  type JsonValue,
+  type WorkflowDocument,
+} from '@agent-loop-snapshot/schema';
 
 import {
   MockReplayRunner,
@@ -1119,75 +1126,816 @@ test('mock replay reproduces the fixture state in a new audited replay trace', a
   assert.equal(events.at(-1)?.type, 'run.completed');
 });
 
-test('default reference redaction keeps event, checkpoint, and mock replay state consistent', async () => {
+test('default state redaction keeps whole logical values consistent through mock replay', async () => {
+  const scenarios: ReadonlyArray<{
+    readonly label: string;
+    readonly path: string;
+    readonly value: string;
+    readonly state: Record<string, string>;
+  }> = [
+    {
+      label: 'generic API-key value',
+      path: '/value',
+      value: 'sk-reviewsecret123456789',
+      state: { value: 'sk-reviewsecret123456789' },
+    },
+    {
+      label: 'API-key field',
+      path: '/api_key',
+      value: 'sk-reviewsecret123456789',
+      state: { api_key: 'sk-reviewsecret123456789' },
+    },
+    {
+      label: 'complete API-key token',
+      path: '/token',
+      value: 'sk-reviewsecret123456789',
+      state: { token: 'sk-reviewsecret123456789' },
+    },
+    {
+      label: 'ordinary password',
+      path: '/password',
+      value: 'review-only-opaque-password',
+      state: { password: 'review-only-opaque-password' },
+    },
+    {
+      label: 'prefixed API-key token',
+      path: '/token',
+      value: 'prefix sk-reviewsecret123456789',
+      state: { token: 'prefix sk-reviewsecret123456789' },
+    },
+  ];
+  for (const scenario of scenarios) {
+    const directory = await mkdtemp(
+      join(process.env.TEMP ?? process.cwd(), 'alsnap-default-redaction-'),
+    );
+    const writer = await SnapshotWriter.open(directory, { flushMode: 'event' });
+    const pipeline = createDefaultRedactionPipeline();
+    const recorder = new Recorder({
+      interceptors: [pipeline.asInterceptor(), writer.asInterceptor()],
+    });
+    const originalState = scenario.state;
+
+    try {
+      const run = await recorder.startRun({
+        runtime: { name: 'redaction-test-runtime', version: '0.1.0' },
+        input: {},
+      });
+      await recorder.appendEvent(run.context(), {
+        type: 'state.changed',
+        payload: { operation: 'set', path: scenario.path, value: scenario.value },
+      });
+      const firstCheckpoint = await recorder.checkpoint(run, {
+        state: originalState,
+        stateHash: hashState(originalState),
+      });
+      const secondCheckpoint = await recorder.checkpoint(run, {
+        state: originalState,
+        stateHash: hashState(originalState),
+      });
+      const thirdCheckpoint = await recorder.checkpoint(run, {
+        state: secondCheckpoint.state,
+        stateHash: hashState(secondCheckpoint.state as typeof originalState),
+      });
+      assert.deepEqual(firstCheckpoint.state, secondCheckpoint.state, scenario.label);
+      assert.deepEqual(secondCheckpoint.state, thirdCheckpoint.state, scenario.label);
+      assert.equal(firstCheckpoint.state_hash, secondCheckpoint.state_hash, scenario.label);
+      assert.equal(secondCheckpoint.state_hash, thirdCheckpoint.state_hash, scenario.label);
+
+      await recorder.completeRun(run, {
+        final_state_hash: thirdCheckpoint.state_hash,
+        output: {},
+      });
+      await writer.commit(recorder.getManifest(run));
+      await writer.close();
+
+      const eventFile = await readFile(join(directory, 'events.jsonl'), 'utf8');
+      const checkpointFile = await readFile(join(directory, 'checkpoints', '000003.json'), 'utf8');
+      assert.equal(eventFile.includes(scenario.value), false, scenario.label);
+      assert.equal(checkpointFile.includes(scenario.value), false, scenario.label);
+
+      const source = await loadTraceSnapshot(directory);
+      assert.equal(source.valid, true, JSON.stringify(source.diagnostics));
+      const fromEvents = await reconstructState(source.events);
+      const fromCheckpoint = await reconstructState(source.events, {
+        checkpoints: source.checkpoints,
+      });
+      assert.deepEqual(fromCheckpoint.state, fromEvents.state, scenario.label);
+      assert.equal(fromCheckpoint.stateHash, fromEvents.stateHash, scenario.label);
+      assert.equal(fromCheckpoint.usedCheckpoint, true, scenario.label);
+
+      const replay = await new MockReplayRunner({ source, recorder: new Recorder() }).run();
+      assert.equal(replay.run.status, 'completed', scenario.label);
+      assert.deepEqual(replay.diagnostics, [], scenario.label);
+      assert.deepEqual(replay.finalState, fromEvents.state, scenario.label);
+      assert.equal(replay.finalStateHash, fromEvents.stateHash, scenario.label);
+    } finally {
+      await writer.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+});
+
+test('unsafe state redaction fails before persistence and full-parent retries replay consistently', async () => {
+  for (const scenario of ['remove', 'append-index'] as const) {
+    const directory = await mkdtemp(join(process.env.TEMP ?? process.cwd(), 'alsnap-safe-state-'));
+    const writer = await SnapshotWriter.open(directory);
+    const secret = 'review-only-secret';
+    const pipeline = new RedactionPipeline({
+      fieldRules: [
+        scenario === 'remove'
+          ? { path: '/profile/password', category: 'password', strategy: 'remove' }
+          : { path: '/tokens/1', category: 'token', strategy: 'mask' },
+      ],
+    });
+    const recorder = new Recorder({
+      interceptors: [pipeline.asInterceptor(), writer.asInterceptor()],
+    });
+    try {
+      const run = await recorder.startRun({ runtime: { name: 'test', version: '1' } });
+      const path = scenario === 'remove' ? '/profile' : '/tokens';
+      await recorder.appendEvent(run.context(), {
+        type: 'state.changed',
+        payload: {
+          operation: 'set',
+          path,
+          value: scenario === 'remove' ? {} : ['public'],
+        },
+      });
+      const before = recorder.getEvents(run);
+      await assert.rejects(
+        recorder.appendEvent(run.context(), {
+          type: 'state.changed',
+          payload: {
+            operation: scenario === 'remove' ? 'set' : 'append',
+            path: scenario === 'remove' ? '/profile/password' : '/tokens',
+            value: secret,
+          },
+        }),
+        (error: unknown) =>
+          error instanceof RedactionError &&
+          error.code ===
+            (scenario === 'remove'
+              ? 'STATE_REDACTION_UNREPRESENTABLE'
+              : 'STATE_REDACTION_CONTEXT_REQUIRED'),
+      );
+      assert.deepEqual(recorder.getEvents(run), before);
+      await writer.flush();
+      assert.equal(
+        (await readFile(join(directory, 'events.jsonl'), 'utf8')).includes(secret),
+        false,
+      );
+
+      // Supply the complete parent value so removal/index rules can be applied exactly.
+      const value =
+        scenario === 'remove' ? { password: secret, label: 'public' } : ['public', secret];
+      const state = scenario === 'remove' ? { profile: value } : { tokens: value };
+      await recorder.appendEvent(run.context(), {
+        type: 'state.changed',
+        payload: { operation: 'set', path, value },
+      });
+      const checkpoint = await recorder.checkpoint(run, { state, stateHash: hashState(state) });
+      await recorder.completeRun(run, { final_state_hash: checkpoint.state_hash });
+      await writer.commit(recorder.getManifest(run));
+      await writer.close();
+      const source = await loadTraceSnapshot(directory);
+      assert.equal(source.valid, true, JSON.stringify(source.diagnostics));
+      const fromEvents = await reconstructState(source.events);
+      const fromCheckpoint = await reconstructState(source.events, {
+        checkpoints: source.checkpoints,
+      });
+      assert.deepEqual(fromEvents.state, fromCheckpoint.state);
+      assert.equal(fromEvents.stateHash, fromCheckpoint.stateHash);
+      assert.equal(
+        (await readFile(join(directory, 'events.jsonl'), 'utf8')).includes(secret),
+        false,
+      );
+      assert.equal(JSON.stringify(source.checkpoints).includes(secret), false);
+      const replay = await new MockReplayRunner({ source, recorder: new Recorder() }).run();
+      assert.equal(replay.run.status, 'completed', JSON.stringify(replay.diagnostics));
+      assert.deepEqual(replay.finalState, fromEvents.state);
+    } finally {
+      await writer.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+});
+
+test('non-object merge redaction is not persisted and a full set retry replays', async () => {
+  for (const strategy of ['mask', 'reference'] as const) {
+    const directory = await mkdtemp(join(process.env.TEMP ?? process.cwd(), 'alsnap-merge-state-'));
+    const writer = await SnapshotWriter.open(directory);
+    const pipeline = new RedactionPipeline({
+      fieldRules: [{ path: '/profile', category: 'private', strategy }],
+    });
+    const recorder = new Recorder({
+      interceptors: [pipeline.asInterceptor(), writer.asInterceptor()],
+    });
+    try {
+      const run = await recorder.startRun({ runtime: { name: 'test', version: '1' } });
+      const value = { password: 'review-only-secret' };
+      const before = recorder.getEvents(run);
+      await writer.flush();
+      const eventPath = join(directory, 'events.jsonl');
+      const beforeFile = await readFile(eventPath, 'utf8');
+      await assert.rejects(
+        recorder.appendEvent(run.context(), {
+          type: 'state.changed',
+          payload: { operation: 'merge', path: '/profile', value },
+        }),
+        (error: unknown) =>
+          error instanceof RedactionError && error.code === 'STATE_REDACTION_UNREPRESENTABLE',
+      );
+      assert.deepEqual(recorder.getEvents(run), before);
+      await writer.flush();
+      assert.equal(await readFile(eventPath, 'utf8'), beforeFile);
+      const retry = await recorder.appendEvent(run.context(), {
+        type: 'state.changed',
+        payload: { operation: 'set', path: '/profile', value },
+      });
+      assert.equal(retry.sequence, before.at(-1)!.sequence + 1);
+      const state = { profile: value };
+      const checkpoint = await recorder.checkpoint(run, { state, stateHash: hashState(state) });
+      await recorder.completeRun(run, { final_state_hash: checkpoint.state_hash });
+      await writer.commit(recorder.getManifest(run));
+      await writer.close();
+      const source = await loadTraceSnapshot(directory);
+      assert.equal(source.valid, true, JSON.stringify(source.diagnostics));
+      const fromEvents = await reconstructState(source.events);
+      const fromCheckpoint = await reconstructState(source.events, {
+        checkpoints: source.checkpoints,
+      });
+      assert.deepEqual(fromEvents.state, fromCheckpoint.state);
+      assert.equal(fromEvents.stateHash, fromCheckpoint.stateHash);
+      assert.equal((await readFile(eventPath, 'utf8')).includes(value.password), false);
+      assert.equal(JSON.stringify(source.checkpoints).includes(value.password), false);
+      const replay = await new MockReplayRunner({ source, recorder: new Recorder() }).run();
+      assert.equal(replay.run.status, 'completed', JSON.stringify(replay.diagnostics));
+      assert.deepEqual(replay.finalState, fromEvents.state);
+    } finally {
+      await writer.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+});
+
+test('unsafe deletes are not persisted and complete parent set retries replay', async () => {
+  for (const scenario of [
+    'object-remove',
+    'array-remove',
+    'array-mask',
+    'custom-remove',
+  ] as const) {
+    const directory = await mkdtemp(
+      join(process.env.TEMP ?? process.cwd(), 'alsnap-delete-state-'),
+    );
+    const writer = await SnapshotWriter.open(directory);
+    const object = scenario === 'object-remove' || scenario === 'custom-remove';
+    const rulePath = object ? '/profile/password' : '/tokens/0';
+    const pipeline = new RedactionPipeline(
+      scenario === 'custom-remove'
+        ? {
+            customRedactors: [
+              { path: rulePath, category: 'private', redact: () => ({ action: 'remove' }) },
+            ],
+          }
+        : {
+            fieldRules: [
+              {
+                path: rulePath,
+                category: 'private',
+                strategy: scenario === 'array-mask' ? 'mask' : 'remove',
+              },
+            ],
+          },
+    );
+    const recorder = new Recorder({
+      interceptors: [pipeline.asInterceptor(), writer.asInterceptor()],
+    });
+    try {
+      const run = await recorder.startRun({ runtime: { name: 'test', version: '1' } });
+      const secret = 'review-only-secret';
+      const path = object ? '/profile' : '/tokens';
+      const initial = object ? { password: secret, label: 'public' } : [secret, 'public', 'keep'];
+      await recorder.appendEvent(run.context(), {
+        type: 'state.changed',
+        payload: { operation: 'set', path, value: initial },
+      });
+      const before = recorder.getEvents(run);
+      await writer.flush();
+      const eventPath = join(directory, 'events.jsonl');
+      const beforeFile = await readFile(eventPath, 'utf8');
+      await assert.rejects(
+        recorder.appendEvent(run.context(), {
+          type: 'state.changed',
+          payload: {
+            operation: 'delete',
+            path: object
+              ? '/profile/password'
+              : scenario === 'array-mask'
+                ? '/tokens/0'
+                : '/tokens/1',
+          },
+        }),
+        (error: unknown) =>
+          error instanceof RedactionError &&
+          (error.code === 'STATE_REDACTION_UNREPRESENTABLE' ||
+            error.code === 'STATE_REDACTION_CONTEXT_REQUIRED'),
+      );
+      assert.deepEqual(recorder.getEvents(run), before);
+      await writer.flush();
+      assert.equal(await readFile(eventPath, 'utf8'), beforeFile);
+      const value = object
+        ? { label: 'public' }
+        : scenario === 'array-mask'
+          ? ['public', 'keep']
+          : [secret, 'keep'];
+      const retry = await recorder.appendEvent(run.context(), {
+        type: 'state.changed',
+        payload: { operation: 'set', path, value },
+      });
+      assert.equal(retry.sequence, before.at(-1)!.sequence + 1);
+      const state = object ? { profile: value } : { tokens: value };
+      const checkpoint = await recorder.checkpoint(run, { state, stateHash: hashState(state) });
+      await recorder.completeRun(run, { final_state_hash: checkpoint.state_hash });
+      await writer.commit(recorder.getManifest(run));
+      await writer.close();
+      const source = await loadTraceSnapshot(directory);
+      assert.equal(source.valid, true, JSON.stringify(source.diagnostics));
+      const restored = await reconstructState(source.events);
+      const fromCheckpoint = await reconstructState(source.events, {
+        checkpoints: source.checkpoints,
+      });
+      assert.deepEqual(restored.state, fromCheckpoint.state);
+      assert.equal(restored.stateHash, fromCheckpoint.stateHash);
+      assert.equal((await readFile(eventPath, 'utf8')).includes(secret), false);
+      assert.equal(JSON.stringify(source.checkpoints).includes(secret), false);
+      const replay = await new MockReplayRunner({ source, recorder: new Recorder() }).run();
+      assert.equal(replay.run.status, 'completed', JSON.stringify(replay.diagnostics));
+      assert.deepEqual(replay.finalState, restored.state);
+    } finally {
+      await writer.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+});
+
+test('logical path and operation fields never rewrite state controls through persistence and replay', async () => {
+  for (const strategy of ['mask', 'reference'] as const) {
+    const directory = await mkdtemp(join(process.env.TEMP ?? process.cwd(), 'alsnap-controls-'));
+    const writer = await SnapshotWriter.open(directory);
+    const pipeline = new RedactionPipeline({
+      fieldRules: [
+        ...['/path', '/operation', '/profile/token', '/tokens/*', '/note'].map((path) => ({
+          path,
+          category: 'private',
+          strategy,
+        })),
+      ],
+    });
+    const recorder = new Recorder({
+      interceptors: [pipeline.asInterceptor(), writer.asInterceptor()],
+    });
+    try {
+      const run = await recorder.startRun({ runtime: { name: 'test', version: '1' } });
+      const secret = 'review-only-secret';
+      for (const payload of [
+        { operation: 'set', path: '/path', value: secret },
+        { operation: 'set', path: '/operation', value: secret },
+        { operation: 'merge', path: '/profile', value: { token: secret } },
+        { operation: 'set', path: '/tokens', value: [] },
+        { operation: 'append', path: '/tokens', value: secret },
+        { operation: 'delete', path: '/path' },
+        { operation: 'delete', path: '/operation' },
+      ]) {
+        const recorded = await recorder.appendEvent(run.context(), {
+          type: 'state.changed',
+          payload: { ...payload, note: secret },
+        });
+        assert.equal(recorded.payload.operation, payload.operation);
+        assert.equal(recorded.payload.path, payload.path);
+        if (payload.operation === 'delete')
+          assert.equal(Object.hasOwn(recorded.payload, 'value'), false);
+        assert.equal(JSON.stringify(recorded.payload).includes(secret), false);
+      }
+      const state = { profile: { token: secret }, tokens: [secret] };
+      const checkpoint = await recorder.checkpoint(run, { state, stateHash: hashState(state) });
+      await recorder.completeRun(run, { final_state_hash: checkpoint.state_hash });
+      await writer.commit(recorder.getManifest(run));
+      await writer.close();
+      const source = await loadTraceSnapshot(directory);
+      assert.equal(source.valid, true, JSON.stringify(source.diagnostics));
+      const restored = await reconstructState(source.events);
+      assert.deepEqual(restored.state, checkpoint.state);
+      assert.equal(restored.stateHash, checkpoint.state_hash);
+      assert.equal(
+        (await readFile(join(directory, 'events.jsonl'), 'utf8')).includes(secret),
+        false,
+      );
+      assert.equal(JSON.stringify(source.checkpoints).includes(secret), false);
+      const replay = await new MockReplayRunner({ source, recorder: new Recorder() }).run();
+      assert.equal(replay.run.status, 'completed', JSON.stringify(replay.diagnostics));
+      assert.deepEqual(replay.finalState, restored.state);
+    } finally {
+      await writer.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+});
+
+test('custom redactors reject partial state changes before persistence and full-parent sets replay', async () => {
   const directory = await mkdtemp(
-    join(process.env.TEMP ?? process.cwd(), 'alsnap-default-redaction-'),
+    join(process.env.TEMP ?? process.cwd(), 'alsnap-custom-context-'),
   );
-  const writer = await SnapshotWriter.open(directory, { flushMode: 'event' });
-  const pipeline = createDefaultRedactionPipeline();
+  const writer = await SnapshotWriter.open(directory);
+  const pipeline = new RedactionPipeline({
+    customRedactors: [
+      {
+        path: '/profile',
+        category: 'private',
+        redact: (value) => {
+          if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+            return { action: 'keep' } as const;
+          }
+          const profile = value as Record<string, unknown>;
+          if (profile.private !== true) return { action: 'keep' } as const;
+          const redacted = { ...profile };
+          delete redacted.label;
+          return { action: 'replace', value: redacted as typeof value } as const;
+        },
+      },
+    ],
+  });
   const recorder = new Recorder({
     interceptors: [pipeline.asInterceptor(), writer.asInterceptor()],
   });
-  const secret = 'sk-reviewsecret123456789';
-  const originalState = { value: secret, api_key: secret };
-
   try {
-    const run = await recorder.startRun({
-      runtime: { name: 'redaction-test-runtime', version: '0.1.0' },
-      input: {},
-    });
+    const run = await recorder.startRun({ runtime: { name: 'test', version: '1' } });
     await recorder.appendEvent(run.context(), {
       type: 'state.changed',
-      payload: { operation: 'set', path: '/value', value: secret },
+      payload: { operation: 'set', path: '/profile', value: { private: true } },
     });
-    await recorder.appendEvent(run.context(), {
+    const before = recorder.getEvents(run);
+    const secret = 'review-only-secret';
+    const eventPath = join(directory, 'events.jsonl');
+    await writer.flush();
+    const beforeFile = await readFile(eventPath, 'utf8');
+    for (const payload of [
+      { operation: 'merge', path: '/profile', value: { label: secret } },
+      { operation: 'set', path: '/profile/label', value: secret },
+    ]) {
+      await assert.rejects(
+        recorder.appendEvent(run.context(), { type: 'state.changed', payload }),
+        (error: unknown) =>
+          error instanceof RedactionError && error.code === 'STATE_REDACTION_CONTEXT_REQUIRED',
+      );
+      assert.deepEqual(recorder.getEvents(run), before);
+      await writer.flush();
+      assert.equal(await readFile(eventPath, 'utf8'), beforeFile);
+    }
+    const retry = await recorder.appendEvent(run.context(), {
       type: 'state.changed',
-      payload: { operation: 'set', path: '/api_key', value: secret },
+      payload: { operation: 'set', path: '/profile', value: { private: true, label: secret } },
     });
-    const firstCheckpoint = await recorder.checkpoint(run, {
-      state: originalState,
-      stateHash: hashState(originalState),
-    });
-    const secondCheckpoint = await recorder.checkpoint(run, {
-      state: originalState,
-      stateHash: hashState(originalState),
-    });
-    const thirdCheckpoint = await recorder.checkpoint(run, {
-      state: secondCheckpoint.state,
-      stateHash: hashState(secondCheckpoint.state as typeof originalState),
-    });
-    assert.deepEqual(firstCheckpoint.state, secondCheckpoint.state);
-    assert.deepEqual(secondCheckpoint.state, thirdCheckpoint.state);
-    assert.equal(firstCheckpoint.state_hash, secondCheckpoint.state_hash);
-    assert.equal(secondCheckpoint.state_hash, thirdCheckpoint.state_hash);
-
-    await recorder.completeRun(run, {
-      final_state_hash: thirdCheckpoint.state_hash,
-      output: {},
-    });
+    assert.equal(retry.sequence, before.at(-1)!.sequence + 1);
+    const state = { profile: { private: true, label: secret } };
+    const checkpoint = await recorder.checkpoint(run, { state, stateHash: hashState(state) });
+    await recorder.completeRun(run, { final_state_hash: checkpoint.state_hash });
     await writer.commit(recorder.getManifest(run));
     await writer.close();
-
-    const eventFile = await readFile(join(directory, 'events.jsonl'), 'utf8');
-    const checkpointFile = await readFile(join(directory, 'checkpoints', '000003.json'), 'utf8');
-    assert.equal(eventFile.includes(secret), false);
-    assert.equal(checkpointFile.includes(secret), false);
-
     const source = await loadTraceSnapshot(directory);
     assert.equal(source.valid, true, JSON.stringify(source.diagnostics));
     const fromEvents = await reconstructState(source.events);
     const fromCheckpoint = await reconstructState(source.events, {
       checkpoints: source.checkpoints,
     });
-    assert.deepEqual(fromCheckpoint.state, fromEvents.state);
-    assert.equal(fromCheckpoint.stateHash, fromEvents.stateHash);
-    assert.equal(fromCheckpoint.usedCheckpoint, true);
-
+    assert.deepEqual(fromEvents.state, { profile: { private: true } });
+    assert.deepEqual(fromEvents.state, fromCheckpoint.state);
+    assert.equal(fromEvents.stateHash, fromCheckpoint.stateHash);
+    assert.equal((await readFile(eventPath, 'utf8')).includes(secret), false);
+    assert.equal(JSON.stringify(source.checkpoints).includes(secret), false);
     const replay = await new MockReplayRunner({ source, recorder: new Recorder() }).run();
-    assert.equal(replay.run.status, 'completed');
-    assert.deepEqual(replay.diagnostics, []);
+    assert.equal(replay.run.status, 'completed', JSON.stringify(replay.diagnostics));
     assert.deepEqual(replay.finalState, fromEvents.state);
-    assert.equal(replay.finalStateHash, fromEvents.stateHash);
+  } finally {
+    await writer.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('custom removals reject stale merge keys and shifted array updates before persistence', async () => {
+  const hidden = { private: true, label: 'review-only-secret' };
+  const original = { private: false, label: 'old', tags: [] };
+  const updated = { ...original, label: 'updated' };
+  const scenarios: {
+    name: string;
+    root: string;
+    rule: string;
+    initial: JsonValue;
+    change: { operation: string; path: string; value: JsonValue };
+    next: JsonValue;
+    error: string;
+  }[] = [
+    {
+      name: 'merge removes an existing child',
+      root: '/profile',
+      rule: '/profile/contact',
+      initial: { contact: original, label: 'parent' },
+      change: { operation: 'merge', path: '/profile', value: { contact: hidden } },
+      next: { contact: hidden, label: 'parent' },
+      error: 'STATE_REDACTION_UNREPRESENTABLE',
+    },
+    ...(['set', 'merge', 'append'] as const).map((operation) => ({
+      name: `array ${operation} after element removal`,
+      root: '/items',
+      rule: '/items/*',
+      initial: [hidden, original],
+      change:
+        operation === 'append'
+          ? { operation, path: '/items/1/tags', value: 'public' }
+          : {
+              operation,
+              path: '/items/1',
+              value: operation === 'set' ? updated : { label: 'updated' },
+            },
+      next: [hidden, operation === 'append' ? { ...original, tags: ['public'] } : updated],
+      error: 'STATE_REDACTION_CONTEXT_REQUIRED',
+    })),
+    {
+      name: 'artifact-backed set after element removal',
+      root: '/items',
+      rule: '/items/*',
+      initial: [hidden, original],
+      change: {
+        operation: 'set',
+        path: '/items/1',
+        value: {
+          schema_version: '0.1.0',
+          digest: 'a'.repeat(64),
+          media_type: 'application/json',
+          byte_length: 128,
+        },
+      },
+      next: [hidden, updated],
+      error: 'STATE_REDACTION_CONTEXT_REQUIRED',
+    },
+    {
+      name: 'artifact-backed set after whole-array filtering',
+      root: '/items',
+      rule: '/items',
+      initial: [hidden, original],
+      change: {
+        operation: 'set',
+        path: '/items/1',
+        value: {
+          schema_version: '0.1.0',
+          digest: 'a'.repeat(64),
+          media_type: 'application/json',
+          byte_length: 128,
+        },
+      },
+      next: [hidden, updated],
+      error: 'STATE_REDACTION_CONTEXT_REQUIRED',
+    },
+  ];
+  for (const scenario of scenarios) {
+    const directory = await mkdtemp(join(process.env.TEMP ?? process.cwd(), 'alsnap-structural-'));
+    const writer = await SnapshotWriter.open(directory);
+    const pipeline = new RedactionPipeline({
+      customRedactors: [
+        {
+          path: scenario.rule,
+          category: 'private',
+          redact: (value) =>
+            Array.isArray(value)
+              ? {
+                  action: 'replace',
+                  value: value.filter(
+                    (item) =>
+                      item === null ||
+                      typeof item !== 'object' ||
+                      Array.isArray(item) ||
+                      item.private !== true,
+                  ),
+                }
+              : value !== null &&
+                  typeof value === 'object' &&
+                  !Array.isArray(value) &&
+                  value.private === true
+                ? { action: 'remove' }
+                : { action: 'keep' },
+        },
+      ],
+    });
+    const recorder = new Recorder({
+      interceptors: [pipeline.asInterceptor(), writer.asInterceptor()],
+    });
+    try {
+      const run = await recorder.startRun({ runtime: { name: 'test', version: '1' } });
+      await recorder.appendEvent(run.context(), {
+        type: 'state.changed',
+        payload: { operation: 'set', path: scenario.root, value: scenario.initial },
+      });
+      const before = recorder.getEvents(run);
+      await writer.flush();
+      const eventPath = join(directory, 'events.jsonl');
+      const beforeFile = await readFile(eventPath, 'utf8');
+      await assert.rejects(
+        recorder.appendEvent(run.context(), { type: 'state.changed', payload: scenario.change }),
+        (error: unknown) => error instanceof RedactionError && error.code === scenario.error,
+        scenario.name,
+      );
+      assert.deepEqual(recorder.getEvents(run), before);
+      await writer.flush();
+      assert.equal(await readFile(eventPath, 'utf8'), beforeFile);
+      const retry = await recorder.appendEvent(run.context(), {
+        type: 'state.changed',
+        payload: { operation: 'set', path: scenario.root, value: scenario.next },
+      });
+      assert.equal(retry.sequence, before.at(-1)!.sequence + 1);
+      const state = { [scenario.root.slice(1)]: scenario.next };
+      const checkpoint = await recorder.checkpoint(run, { state, stateHash: hashState(state) });
+      await recorder.completeRun(run, { final_state_hash: checkpoint.state_hash });
+      await writer.commit(recorder.getManifest(run));
+      await writer.close();
+      const source = await loadTraceSnapshot(directory);
+      assert.equal(source.valid, true, JSON.stringify(source.diagnostics));
+      const fromEvents = await reconstructState(source.events);
+      const fromCheckpoint = await reconstructState(source.events, {
+        checkpoints: source.checkpoints,
+      });
+      assert.deepEqual(fromEvents.state, fromCheckpoint.state);
+      assert.equal(fromEvents.stateHash, fromCheckpoint.stateHash);
+      assert.equal((await readFile(eventPath, 'utf8')).includes(hidden.label), false);
+      assert.equal(JSON.stringify(source.checkpoints).includes(hidden.label), false);
+      const replay = await new MockReplayRunner({ source, recorder: new Recorder() }).run();
+      assert.equal(replay.run.status, 'completed', JSON.stringify(replay.diagnostics));
+      assert.deepEqual(replay.finalState, fromEvents.state);
+    } finally {
+      await writer.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+});
+
+test('protocol controls and canonical references survive real persistence and replay', async () => {
+  const directory = await mkdtemp(
+    join(process.env.TEMP ?? process.cwd(), 'alsnap-protocol-controls-'),
+  );
+  const writer = await SnapshotWriter.open(directory);
+  const pipeline = new RedactionPipeline({
+    fieldRules: [
+      ...['/state_hash', '/final_state_hash', '/sequence', '/checkpoint_id', '/last_event_id'].map(
+        (path) => ({ path, category: 'private', strategy: 'mask' as const }),
+      ),
+      { path: '/profile', category: 'private', strategy: 'reference' },
+    ],
+  });
+  const recorder = new Recorder({
+    interceptors: [pipeline.asInterceptor(), writer.asInterceptor()],
+  });
+  const secret = 'review-only-secret';
+  try {
+    const run = await recorder.startRun({ runtime: { name: 'test', version: '1' } });
+    for (const key of [
+      'state_hash',
+      'final_state_hash',
+      'sequence',
+      'checkpoint_id',
+      'last_event_id',
+    ]) {
+      await recorder.appendEvent(run.context(), {
+        type: 'state.changed',
+        payload: { operation: 'set', path: `/${key}`, value: secret },
+      });
+    }
+    await recorder.appendEvent(run.context(), {
+      type: 'state.changed',
+      payload: { operation: 'set', path: '/profile', value: { a: secret, b: 2 } },
+    });
+    const state = {
+      last_event_id: secret,
+      checkpoint_id: secret,
+      sequence: secret,
+      final_state_hash: secret,
+      state_hash: secret,
+      profile: { b: 2, a: secret },
+    };
+    const checkpoint = await recorder.checkpoint(run, { state, stateHash: hashState(state) });
+    await recorder.completeRun(run, { final_state_hash: checkpoint.state_hash });
+    await writer.commit(recorder.getManifest(run));
+    await writer.close();
+    const source = await loadTraceSnapshot(directory);
+    assert.equal(source.valid, true, JSON.stringify(source.diagnostics));
+    const fromEvents = await reconstructState(source.events);
+    const fromCheckpoint = await reconstructState(source.events, {
+      checkpoints: source.checkpoints,
+    });
+    assert.deepEqual(fromEvents.state, fromCheckpoint.state);
+    assert.equal(fromEvents.stateHash, fromCheckpoint.stateHash);
+    const checkpointEvent = source.events.find((entry) => entry.type === 'checkpoint.created');
+    assert.equal(typeof (checkpointEvent?.payload as { sequence?: unknown }).sequence, 'number');
+    assert.match(
+      (checkpointEvent?.payload as { state_hash?: unknown }).state_hash as string,
+      /^[a-f0-9]{64}$/,
+    );
+    const eventFile = await readFile(join(directory, 'events.jsonl'), 'utf8');
+    assert.equal(eventFile.includes(secret), false);
+    assert.equal(JSON.stringify(source.checkpoints).includes(secret), false);
+    const replay = await new MockReplayRunner({ source, recorder: new Recorder() }).run();
+    assert.equal(replay.run.status, 'completed', JSON.stringify(replay.diagnostics));
+    assert.deepEqual(replay.finalState, fromEvents.state);
+  } finally {
+    await writer.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('large numeric and dash keys and real array updates redact consistently through persistence and replay', async () => {
+  const directory = await mkdtemp(join(process.env.TEMP ?? process.cwd(), 'alsnap-numeric-'));
+  const writer = await SnapshotWriter.open(directory);
+  const pipeline = new RedactionPipeline({
+    fieldRules: [
+      { path: '/byId/*/password', category: 'private', strategy: 'reference' },
+      { path: '/byId/*/tokens/*', category: 'private', strategy: 'mask' },
+      { path: '/items/*/password', category: 'private', strategy: 'reference' },
+      { path: '/items/*/tokens/*', category: 'private', strategy: 'mask' },
+      { path: '/exact/-/password', category: 'private', strategy: 'mask' },
+      { path: '/exact/-/tokens/*', category: 'private', strategy: 'mask' },
+    ],
+  });
+  const recorder = new Recorder({
+    interceptors: [pipeline.asInterceptor(), writer.asInterceptor()],
+  });
+  const secret = 'review-only-secret';
+  try {
+    const run = await recorder.startRun({ runtime: { name: 'test', version: '1' } });
+    const write = async (operation: string, path: string, value?: JsonValue) => {
+      await recorder.appendEvent(run.context(), {
+        type: 'state.changed',
+        payload: { operation, path, ...(operation === 'delete' ? {} : { value }) },
+      });
+    };
+    await write('set', '/byId', {});
+    await write('set', '/exact', {});
+    const beforeEvents = recorder.getEvents(run);
+    const beforeFile = await readFile(join(directory, 'events.jsonl'), 'utf8');
+    await assert.rejects(
+      write('set', '/exact/-', { password: secret }),
+      (error: unknown) =>
+        error instanceof RedactionError && error.code === 'STATE_REDACTION_CONTEXT_REQUIRED',
+    );
+    assert.deepEqual(recorder.getEvents(run), beforeEvents);
+    assert.equal(await readFile(join(directory, 'events.jsonl'), 'utf8'), beforeFile);
+    await write('set', '/exact', { '-': { password: secret, tokens: [] } });
+    await write('merge', '/exact/-', { password: secret });
+    await write('set', '/exact/-/password', secret);
+    await write('append', '/exact/-/tokens', secret);
+    await write('set', '/exact/-/tokens/-', secret);
+    const keys = ['-', '1000000', '4294967295', '9007199254740993', '9'.repeat(80)];
+    for (const key of keys) {
+      const path = `/byId/${key}`;
+      await write('set', path, { password: secret, tokens: [] });
+      await write('merge', path, { password: secret, label: 'public' });
+      await write('append', `${path}/tokens`, secret);
+      await write('set', `${path}/tokens/0`, secret);
+      await write('set', `${path}/tokens/-`, secret);
+      await write('delete', `${path}/label`);
+    }
+    await write('set', '/items', [{ password: secret, tokens: [] }]);
+    await write('merge', '/items/0', { password: secret });
+    await write('append', '/items/0/tokens', secret);
+    await write('set', '/items/0/tokens/-', secret);
+    await write('set', '/items/0', { password: secret, tokens: [secret] });
+    await write('append', '/items', { password: secret, tokens: [] });
+    await write('set', '/items/-', { password: secret, tokens: [] });
+    const state = {
+      exact: { '-': { password: secret, tokens: [secret, secret] } },
+      byId: Object.fromEntries(
+        keys.map((key) => [key, { password: secret, tokens: [secret, secret] }]),
+      ),
+      items: [
+        { password: secret, tokens: [secret] },
+        { password: secret, tokens: [] },
+        { password: secret, tokens: [] },
+      ],
+    };
+    const checkpoint = await recorder.checkpoint(run, { state, stateHash: hashState(state) });
+    await recorder.completeRun(run, { final_state_hash: checkpoint.state_hash });
+    await writer.commit(recorder.getManifest(run));
+    await writer.close();
+    const source = await loadTraceSnapshot(directory);
+    assert.equal(source.valid, true, JSON.stringify(source.diagnostics));
+    const restored = await reconstructState(source.events);
+    const fromCheckpoint = await reconstructState(source.events, {
+      checkpoints: source.checkpoints,
+    });
+    assert.deepEqual(restored.state, fromCheckpoint.state);
+    assert.equal(restored.stateHash, fromCheckpoint.stateHash);
+    assert.equal((await readFile(join(directory, 'events.jsonl'), 'utf8')).includes(secret), false);
+    assert.equal(JSON.stringify(source.checkpoints).includes(secret), false);
+    const replay = await new MockReplayRunner({ source, recorder: new Recorder() }).run();
+    assert.equal(replay.run.status, 'completed', JSON.stringify(replay.diagnostics));
+    assert.deepEqual(replay.finalState, restored.state);
   } finally {
     await writer.close();
     await rm(directory, { recursive: true, force: true });
