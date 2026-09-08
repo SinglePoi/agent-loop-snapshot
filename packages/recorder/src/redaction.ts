@@ -66,7 +66,13 @@ export interface RedactedArtifact {
 
 export class RedactionError extends Error {
   constructor(
-    readonly code: 'INVALID_PATH' | 'REDACTOR_FAILED' | 'UNSUPPORTED_VALUE',
+    readonly code:
+      | 'INVALID_PATH'
+      | 'REDACTOR_FAILED'
+      | 'UNSUPPORTED_VALUE'
+      | 'PROTOCOL_REDACTION_UNREPRESENTABLE'
+      | 'STATE_REDACTION_UNREPRESENTABLE'
+      | 'STATE_REDACTION_CONTEXT_REQUIRED',
     message: string,
   ) {
     super(message);
@@ -175,6 +181,20 @@ function cloneJson(value: JsonValue): JsonValue {
   return JSON.parse(JSON.stringify(value)) as JsonValue;
 }
 
+/** Stable JSON identity: object property order is not part of a JSON value's identity. */
+function canonicalJson(value: JsonValue): string {
+  if (value === null || typeof value !== 'object') {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalJson(item)).join(',')}]`;
+  }
+  return `{${Object.keys(value)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key]!)}`)
+    .join(',')}}`;
+}
+
 function pathSegments(path: string): string[] {
   if (path === '') {
     return [];
@@ -189,6 +209,12 @@ function pathSegments(path: string): string[] {
     .slice(1)
     .split('/')
     .map((segment) => segment.replaceAll('~1', '/').replaceAll('~0', '~'));
+}
+
+function pointerPath(segments: readonly string[]): string {
+  return segments.length === 0
+    ? ''
+    : `/${segments.map((segment) => segment.replaceAll('~', '~0').replaceAll('/', '~1')).join('/')}`;
 }
 
 function arrayIndex(segment: string): number | undefined {
@@ -323,6 +349,7 @@ async function applyPathRule(
         `${actualPath}/${index}`,
       );
       if (child.removed) {
+        entries.push(...child.entries);
         value.splice(index, 1);
         changed = true;
         continue;
@@ -582,6 +609,590 @@ async function redactJsonValue(
   return { value, redactions };
 }
 
+type StateChangeOperation = 'set' | 'merge' | 'delete' | 'append';
+
+const unsafeStatePathSegments = new Set(['__proto__', 'constructor', 'prototype']);
+
+interface StateChangePayloadForRedaction {
+  readonly operation: StateChangeOperation;
+  readonly path: string;
+  readonly value: unknown;
+}
+
+interface StateChangeProjection {
+  readonly root: JsonValue;
+  readonly targetSegments: readonly string[];
+  readonly appended: boolean;
+}
+
+function stateChangePayloadForRedaction(
+  value: unknown,
+): StateChangePayloadForRedaction | undefined {
+  if (
+    !isRecord(value) ||
+    typeof value.path !== 'string' ||
+    (value.operation !== 'delete' && !Object.hasOwn(value, 'value')) ||
+    (value.operation !== 'set' &&
+      value.operation !== 'merge' &&
+      value.operation !== 'delete' &&
+      value.operation !== 'append')
+  ) {
+    return undefined;
+  }
+  return {
+    operation: value.operation,
+    path: value.path,
+    value: value.value,
+  };
+}
+
+function ruleMatchesPrefix(rule: readonly string[], path: readonly string[]): boolean {
+  return (
+    rule.length <= path.length &&
+    rule.every((segment, index) => segment === '*' || segment === path[index])
+  );
+}
+
+function pathsCanOverlap(left: readonly string[], right: readonly string[]): boolean {
+  return left
+    .slice(0, Math.min(left.length, right.length))
+    .every((segment, index) => segment === '*' || right[index] === '*' || segment === right[index]);
+}
+
+/** Rules may have replaced an array or compacted its elements before this original index. */
+function assertStateArrayAddressesAreStable(
+  payload: StateChangePayloadForRedaction,
+  pipeline: RedactionPipeline,
+): void {
+  const target = pathSegments(payload.path);
+  for (let depth = 0; depth < target.length; depth += 1) {
+    if (arrayIndex(target[depth]!) === undefined) continue;
+    const parent = target.slice(0, depth);
+    const affectsAddress = (path: string, canRemoveElement: boolean): boolean => {
+      const rule = pathSegments(path);
+      if (rule.length <= depth) return ruleMatchesPrefix(rule, parent);
+      return (
+        canRemoveElement &&
+        rule.length === depth + 1 &&
+        ruleMatchesPrefix(rule.slice(0, depth), parent) &&
+        (rule[depth] === '*' || arrayIndex(rule[depth]!) !== undefined)
+      );
+    };
+    if (
+      pipeline.fieldRules.some((rule) => affectsAddress(rule.path, rule.strategy === 'remove')) ||
+      pipeline.customRedactors.some(
+        (rule) => rule.path === undefined || affectsAddress(rule.path, true),
+      )
+    ) {
+      throw new RedactionError(
+        'STATE_REDACTION_CONTEXT_REQUIRED',
+        'Redaction may have shifted an array address. Record the complete updated array with set instead.',
+      );
+    }
+  }
+}
+
+/**
+ * Incremental state events only carry their changed value. A custom callback at an
+ * ancestor would otherwise see a synthetic partial object instead of the current state.
+ */
+function assertCustomRulesHaveStateContext(
+  payload: StateChangePayloadForRedaction,
+  pipeline: RedactionPipeline,
+): void {
+  if (pipeline.customRedactors.length === 0 || payload.operation === 'delete') {
+    return;
+  }
+
+  const target = pathSegments(payload.path);
+  for (const rule of pipeline.customRedactors) {
+    if (rule.path === undefined) {
+      throw new RedactionError(
+        'STATE_REDACTION_CONTEXT_REQUIRED',
+        'A global custom redactor requires the complete state. Use a scoped rule and record the complete updated parent with set instead.',
+      );
+    }
+    const rulePath = pathSegments(rule.path);
+    const ruleIsAncestorOrTarget =
+      rulePath.length <= target.length && pathsCanOverlap(rulePath, target);
+    const requiresExistingTarget = payload.operation === 'merge' && ruleIsAncestorOrTarget;
+    const requiresAncestorState =
+      payload.operation === 'set' && rulePath.length < target.length && ruleIsAncestorOrTarget;
+    if (requiresExistingTarget || requiresAncestorState) {
+      throw new RedactionError(
+        'STATE_REDACTION_CONTEXT_REQUIRED',
+        'Custom redaction requires state outside this incremental change. Record the complete updated parent with set instead.',
+      );
+    }
+  }
+}
+
+/** Deletes carry no original state: only allow rules that preserve their addressing semantics. */
+function assertDeleteRulesAreSafe(path: string, pipeline: RedactionPipeline): void {
+  const target = pathSegments(path);
+  for (const rule of pipeline.fieldRules) {
+    const segments = pathSegments(rule.path);
+    if (
+      ruleMatchesPrefix(segments, target) &&
+      (rule.strategy === 'remove' || segments.length < target.length)
+    ) {
+      throw new RedactionError(
+        'STATE_REDACTION_UNREPRESENTABLE',
+        'Redaction may remove the delete target or replace an ancestor. Record the complete updated parent with set instead.',
+      );
+    }
+  }
+
+  // Numeric pointer segments may address arrays. Without container state, also treat numeric
+  // object keys conservatively. Removing an element can shift any later addressed element.
+  const arrayParents = target.flatMap((segment, index) =>
+    arrayIndex(segment) === undefined ? [] : [{ path: target.slice(0, index), index }],
+  );
+  const contextualField = pipeline.fieldRules.some((rule) => {
+    const segments = pathSegments(rule.path);
+    return arrayParents.some((parent) => {
+      if (
+        segments.length <= parent.index ||
+        !ruleMatchesPrefix(segments.slice(0, parent.index), parent.path)
+      )
+        return false;
+      const element = segments[parent.index]!;
+      const matchesElement = element === '*' || arrayIndex(element) !== undefined;
+      const removesElement = rule.strategy === 'remove' && segments.length === parent.index + 1;
+      const shiftsIndexedRules =
+        parent.index === target.length - 1 && arrayIndex(element) !== undefined;
+      return matchesElement && (removesElement || shiftsIndexedRules);
+    });
+  });
+  const contextualCustom = pipeline.customRedactors.some((rule) => {
+    if (rule.path === undefined) return true;
+    const segments = pathSegments(rule.path);
+    const overlaps = ruleMatchesPrefix(segments.slice(0, target.length), target);
+    return (
+      overlaps ||
+      arrayParents.some((parent) => ruleMatchesPrefix(segments.slice(0, parent.index), parent.path))
+    );
+  });
+  if (contextualField || contextualCustom) {
+    throw new RedactionError(
+      'STATE_REDACTION_CONTEXT_REQUIRED',
+      'Delete redaction requires the original state or array positions for these rules. Record the complete updated parent with set instead.',
+    );
+  }
+}
+
+function virtualStateContainer(segment: string, value: JsonValue): JsonValue {
+  // A numeric pointer token can be an object key, not an array index. Keep every
+  // virtual ancestor as a single own property: no rounding, holes or index-sized
+  // allocation. Real arrays in the supplied value keep their normal array semantics;
+  // the address/context guards above handle operations that require container state.
+  const container: JsonObject = {};
+  Object.defineProperty(container, segment, {
+    configurable: true,
+    enumerable: true,
+    value,
+    writable: true,
+  });
+  return container;
+}
+
+function stateChangeProjection(
+  payload: StateChangePayloadForRedaction,
+): StateChangeProjection | undefined {
+  let segments: string[];
+  try {
+    segments = pathSegments(payload.path);
+  } catch {
+    return undefined;
+  }
+  if (segments.length === 0 || segments.some((segment) => unsafeStatePathSegments.has(segment))) {
+    return undefined;
+  }
+
+  const trailingSet = payload.operation === 'set' && segments.at(-1) === '-';
+  const appended = payload.operation === 'append' || trailingSet;
+  const targetSegments =
+    payload.operation === 'append' ? segments : trailingSet ? segments.slice(0, -1) : segments;
+  let root: JsonValue = appended
+    ? [normalizeValue(payload.value).value]
+    : normalizeValue(payload.value).value;
+  for (
+    let index = (trailingSet ? segments.length - 1 : segments.length) - 1;
+    index >= 0;
+    index -= 1
+  ) {
+    root = virtualStateContainer(segments[index]!, root);
+  }
+  return { root, targetSegments, appended };
+}
+
+function valueAtStatePath(value: JsonValue, segments: readonly string[]): JsonValue | undefined {
+  let current = value;
+  for (const segment of segments) {
+    if (Array.isArray(current)) {
+      const index = arrayIndex(segment);
+      if (index === undefined || !Object.hasOwn(current, index)) {
+        return undefined;
+      }
+      current = current[index]!;
+      continue;
+    }
+    if (!isRecord(current) || !Object.hasOwn(current, segment)) {
+      return undefined;
+    }
+    current = current[segment] as JsonValue;
+  }
+  return current;
+}
+
+/** A projected append occupies virtual index zero; report it as the protocol's trailing dash. */
+function stateRedactionEntries(
+  entries: readonly RedactionEntry[],
+  projection: StateChangeProjection,
+): RedactionEntry[] {
+  if (!projection.appended) {
+    return [...entries];
+  }
+  const virtualPrefix = pointerPath([...projection.targetSegments, '0']);
+  const appendPrefix = pointerPath([...projection.targetSegments, '-']);
+  return entries.map((entry) =>
+    entry.path === virtualPrefix || entry.path.startsWith(`${virtualPrefix}/`)
+      ? { ...entry, path: `${appendPrefix}${entry.path.slice(virtualPrefix.length)}` }
+      : entry,
+  );
+}
+
+/** An isolated append has no reliable index; never evaluate index-sensitive rules at zero. */
+function assertAppendRulesArePositionIndependent(
+  projection: StateChangeProjection,
+  pipeline: RedactionPipeline,
+): void {
+  if (!projection.appended) {
+    return;
+  }
+  const target = projection.targetSegments;
+  const overlaps = (segments: readonly string[]): boolean =>
+    segments
+      .slice(0, Math.min(segments.length, target.length))
+      .every((segment, index) => segment === '*' || segment === target[index]);
+  const indexedField = pipeline.fieldRules.some((rule) => {
+    const segments = pathSegments(rule.path);
+    return overlaps(segments) && arrayIndex(segments[target.length] ?? '') !== undefined;
+  });
+  // A custom callback can inspect the concrete index in context.path, even with a wildcard.
+  const contextualCustom = pipeline.customRedactors.some(
+    (rule) => rule.path === undefined || overlaps(pathSegments(rule.path)),
+  );
+  if (indexedField || contextualCustom) {
+    throw new RedactionError(
+      'STATE_REDACTION_CONTEXT_REQUIRED',
+      'Append redaction requires the actual array position for these rules. Record the updated array with set instead.',
+    );
+  }
+}
+
+async function redactStateChangeValue(
+  payload: StateChangePayloadForRedaction,
+  pipeline: RedactionPipeline,
+): Promise<ApplyResult | undefined> {
+  if (payload.operation === 'delete' || isArtifactReference(payload.value)) {
+    return undefined;
+  }
+  assertCustomRulesHaveStateContext(payload, pipeline);
+  const projection = stateChangeProjection(payload);
+  if (projection === undefined) {
+    return undefined;
+  }
+  assertAppendRulesArePositionIndependent(projection, pipeline);
+  const result = await redactJsonValue(projection.root, pipeline, {
+    pathPrefix: '',
+    source: 'event',
+    eventType: 'state.changed',
+  });
+  const target = valueAtStatePath(result.value, projection.targetSegments);
+  if (projection.appended && !Array.isArray(target)) {
+    throw new RedactionError(
+      'STATE_REDACTION_UNREPRESENTABLE',
+      'Redaction removed or replaced the append container. Record the updated parent state with set instead.',
+    );
+  }
+  const value = projection.appended && Array.isArray(target) ? target.at(-1) : target;
+  if (value === undefined) {
+    throw new RedactionError(
+      'STATE_REDACTION_UNREPRESENTABLE',
+      'Redaction removed the state change target. Record the updated parent state with set instead.',
+    );
+  }
+  if (payload.operation === 'merge' && !isRecord(value)) {
+    throw new RedactionError(
+      'STATE_REDACTION_UNREPRESENTABLE',
+      'Redaction replaced the merge value with a non-object. Record the complete updated target with set instead.',
+    );
+  }
+  if (payload.operation === 'merge' && isRecord(value)) {
+    const original = normalizeValue(payload.value).value;
+    if (isRecord(original) && Object.keys(original).some((key) => !Object.hasOwn(value, key))) {
+      throw new RedactionError(
+        'STATE_REDACTION_UNREPRESENTABLE',
+        'Redaction removed a merge patch key, which would leave the existing value unchanged. Record the complete updated target with set instead.',
+      );
+    }
+  }
+  return {
+    value,
+    removed: false,
+    changed: JSON.stringify(value) !== JSON.stringify(payload.value),
+    entries: stateRedactionEntries(result.redactions, projection),
+  };
+}
+
+async function redactStateChangePayload(
+  payload: unknown,
+  pipeline: RedactionPipeline,
+): Promise<{ value: JsonValue; redactions: RedactionEntry[] } | undefined> {
+  const stateChange = stateChangePayloadForRedaction(payload);
+  if (stateChange === undefined || !isRecord(payload)) {
+    return undefined;
+  }
+
+  if (stateChange.operation === 'delete') {
+    assertDeleteRulesAreSafe(stateChange.path, pipeline);
+  }
+  // Address safety applies even when the value is handled at the artifact boundary.
+  assertStateArrayAddressesAreStable(stateChange, pipeline);
+
+  // Only set at a trailing dash is ambiguous: it can address an object property
+  // or append to an array. Exact dash rules do not apply to array elements, so
+  // evaluating either interpretation alone could leak data or change replay state.
+  const statePath = pathSegments(stateChange.path);
+  if (stateChange.operation === 'set' && statePath.at(-1) === '-') {
+    const depth = statePath.length - 1;
+    if (
+      pipeline.fieldRules.some((rule) => {
+        const segments = pathSegments(rule.path);
+        return (
+          segments[depth] === '-' &&
+          pathsCanOverlap(segments.slice(0, depth), statePath.slice(0, depth))
+        );
+      })
+    ) {
+      throw new RedactionError(
+        'STATE_REDACTION_CONTEXT_REQUIRED',
+        'A trailing dash may be an object key or an array append. Record the complete updated parent with set instead.',
+      );
+    }
+  }
+
+  // Field/custom rules address state data, not the protocol's operation and JSON Pointer.
+  // A regex-detected secret in a control cannot be masked without changing semantics.
+  const controls = { operation: stateChange.operation, path: stateChange.path };
+  if (applyRegexRules({ ...controls }, pipeline.regexRules, '/payload', pipeline).changed) {
+    throw new RedactionError(
+      'STATE_REDACTION_UNREPRESENTABLE',
+      'A state control field requires redaction. Use a non-sensitive state path instead.',
+    );
+  }
+  const projected = stateChange.operation !== 'delete' && !isArtifactReference(stateChange.value);
+  const stateResult = projected ? await redactStateChangeValue(stateChange, pipeline) : undefined;
+  if (projected && stateResult === undefined) {
+    throw new RedactionError(
+      'STATE_REDACTION_UNREPRESENTABLE',
+      'The state change cannot be safely projected for redaction.',
+    );
+  }
+  const metadata = { ...payload };
+  delete metadata.operation;
+  delete metadata.path;
+  if (projected) delete metadata.value;
+  const metadataResult = await redactJsonValue(metadata, pipeline, {
+    pathPrefix: '/payload',
+    source: 'event',
+    eventType: 'state.changed',
+  });
+  if (!isRecord(metadataResult.value)) {
+    throw new RedactionError(
+      'STATE_REDACTION_UNREPRESENTABLE',
+      'Redaction replaced the state event metadata with a non-object.',
+    );
+  }
+
+  const redactions = [...metadataResult.redactions];
+  stateResult?.entries.forEach((entry) => addEntry(redactions, entry));
+  return {
+    value: {
+      ...metadataResult.value,
+      ...controls,
+      ...(stateResult === undefined ? {} : { value: stateResult.value }),
+    },
+    redactions,
+  };
+}
+
+/**
+ * These fields bind an event to its lifecycle, replay correlation, or checkpoint.
+ * A field rule can name the same word as ordinary data, but must never corrupt this
+ * protocol metadata. Regex matches are rejected rather than silently preserving a
+ * potentially sensitive control value.
+ */
+const protocolControlPaths: Readonly<Record<string, readonly (readonly string[])[]>> = {
+  'run.started': [['runtime']],
+  'run.completed': [['final_state_hash']],
+  'run.failed': [
+    ['error', 'code'],
+    ['error', 'retryable'],
+    ['error', 'kind'],
+  ],
+  'model.requested': [['correlation_key'], ['model']],
+  'model.completed': [['correlation_key']],
+  'model.failed': [
+    ['correlation_key'],
+    ['attempt'],
+    ['error', 'code'],
+    ['error', 'retryable'],
+    ['error', 'kind'],
+  ],
+  'tool.requested': [['correlation_key'], ['tool']],
+  'tool.completed': [['correlation_key']],
+  'tool.failed': [
+    ['correlation_key'],
+    ['attempt'],
+    ['error', 'code'],
+    ['error', 'retryable'],
+    ['error', 'kind'],
+  ],
+  'checkpoint.created': [['checkpoint_id'], ['last_event_id'], ['sequence'], ['state_hash']],
+  'verification.completed': [['verifier'], ['result']],
+};
+
+function valueAtObjectPath(value: JsonObject, segments: readonly string[]): JsonValue | undefined {
+  let current: JsonValue = value;
+  for (const segment of segments) {
+    if (!isRecord(current) || !Object.hasOwn(current, segment)) {
+      return undefined;
+    }
+    current = current[segment]!;
+  }
+  return current;
+}
+
+function deleteObjectPath(value: JsonObject, segments: readonly string[]): void {
+  if (segments.length === 0) return;
+  let current = value;
+  for (const segment of segments.slice(0, -1)) {
+    const next = current[segment];
+    if (!isRecord(next)) return;
+    current = next;
+  }
+  delete current[segments.at(-1)!];
+}
+
+function setObjectPath(
+  value: JsonObject,
+  segments: readonly string[],
+  replacement: JsonValue,
+): void {
+  let current = value;
+  for (const segment of segments.slice(0, -1)) {
+    const existing = current[segment];
+    if (isRecord(existing)) {
+      current = existing;
+      continue;
+    }
+    const child: JsonObject = {};
+    Object.defineProperty(current, segment, {
+      configurable: true,
+      enumerable: true,
+      value: child,
+      writable: true,
+    });
+    current = child;
+  }
+  Object.defineProperty(current, segments.at(-1)!, {
+    configurable: true,
+    enumerable: true,
+    value: replacement,
+    writable: true,
+  });
+}
+
+function ruleWouldReplaceProtocolContainer(
+  rulePath: readonly string[],
+  controlPath: readonly string[],
+): boolean {
+  return (
+    rulePath.length < controlPath.length &&
+    pathsCanOverlap(rulePath, controlPath.slice(0, rulePath.length))
+  );
+}
+
+function assertProtocolContainersArePreserved(
+  eventType: string,
+  controls: readonly (readonly string[])[],
+  pipeline: RedactionPipeline,
+): void {
+  for (const rule of [...pipeline.fieldRules, ...pipeline.customRedactors]) {
+    if (rule.path === undefined) continue;
+    const rulePath = pathSegments(rule.path);
+    if (controls.some((controlPath) => ruleWouldReplaceProtocolContainer(rulePath, controlPath))) {
+      throw new RedactionError(
+        'PROTOCOL_REDACTION_UNREPRESENTABLE',
+        `A redaction rule would replace protocol metadata for ${eventType}. Use a rule for a payload data field instead.`,
+      );
+    }
+  }
+}
+
+async function redactProtocolEventPayload(
+  payload: unknown,
+  eventType: string,
+  pipeline: RedactionPipeline,
+): Promise<{ value: JsonValue; redactions: RedactionEntry[] } | undefined> {
+  const controls = protocolControlPaths[eventType];
+  if (controls === undefined || !isRecord(payload)) {
+    return undefined;
+  }
+  const normalized = normalizeValue(payload).value;
+  if (!isRecord(normalized)) {
+    return undefined;
+  }
+  assertProtocolContainersArePreserved(eventType, controls, pipeline);
+  const values = controls.flatMap((segments) => {
+    const value = valueAtObjectPath(normalized, segments);
+    return value === undefined ? [] : [{ segments, value }];
+  });
+  for (const control of values) {
+    if (
+      applyRegexRules(
+        cloneJson(control.value),
+        pipeline.regexRules,
+        `/payload${pointerPath(control.segments)}`,
+        pipeline,
+      ).changed
+    ) {
+      throw new RedactionError(
+        'PROTOCOL_REDACTION_UNREPRESENTABLE',
+        `A protocol field for ${eventType} requires redaction. Use non-sensitive protocol metadata instead.`,
+      );
+    }
+  }
+  const metadata = cloneJson(normalized) as JsonObject;
+  values.forEach(({ segments }) => deleteObjectPath(metadata, segments));
+  const redacted = await redactJsonValue(metadata, pipeline, {
+    pathPrefix: '/payload',
+    source: 'event',
+    eventType,
+  });
+  if (!isRecord(redacted.value)) {
+    throw new RedactionError(
+      'PROTOCOL_REDACTION_UNREPRESENTABLE',
+      `Redaction replaced the ${eventType} payload with a non-object.`,
+    );
+  }
+  const redactedPayload = redacted.value as JsonObject;
+  values.forEach(({ segments, value }) => setObjectPath(redactedPayload, segments, value));
+  return { value: redactedPayload, redactions: redacted.redactions };
+}
+
 function isTextMediaType(mediaType: string): boolean {
   return mediaType.startsWith('text/') || /(?:json|javascript|xml|yaml|csv)/i.test(mediaType);
 }
@@ -643,7 +1254,10 @@ export class RedactionPipeline {
     if (strategy === 'mask') {
       return placeholder(category, strategy);
     }
-    const key = `${safeCategory(category)}\u0000${JSON.stringify(value)}`;
+    // A reference represents the identity of the redacted value, not the rule
+    // that found it. The same state value can reach events and checkpoints
+    // through different field or regex categories.
+    const key = canonicalJson(value);
     const existing = this.referencePlaceholders.get(key);
     if (existing !== undefined) {
       return existing;
@@ -656,11 +1270,22 @@ export class RedactionPipeline {
   async redactEvent(
     event: Readonly<EventEnvelope<string, unknown>>,
   ): Promise<EventEnvelope<string, unknown>> {
-    const result = await redactJsonValue(event.payload, this, {
-      pathPrefix: '/payload',
-      source: 'event',
-      eventType: event.type,
-    });
+    const stateChangeResult =
+      event.type === 'state.changed'
+        ? await redactStateChangePayload(event.payload, this)
+        : undefined;
+    const protocolResult =
+      stateChangeResult === undefined
+        ? await redactProtocolEventPayload(event.payload, event.type, this)
+        : undefined;
+    const result =
+      stateChangeResult ??
+      protocolResult ??
+      (await redactJsonValue(event.payload, this, {
+        pathPrefix: '/payload',
+        source: 'event',
+        eventType: event.type,
+      }));
     const existing = event.security?.redactions ?? [];
     const redactions = [...existing];
     result.redactions.forEach((entry) => addEntry(redactions, entry));
