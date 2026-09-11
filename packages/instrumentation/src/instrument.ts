@@ -127,7 +127,12 @@ function isPlainRecord(value: object): boolean {
   return prototype === Object.prototype || prototype === null;
 }
 
-function safeJsonCopy(value: unknown, seen = new WeakSet<object>()): JsonValue {
+/**
+ * Copies only JSON primitives, arrays, and plain own data properties. SDK
+ * integrations use this to avoid evaluating application getters or arbitrary
+ * `toJSON` methods while taking a recording-only copy.
+ */
+export function safeJsonCopy(value: unknown, seen = new WeakSet<object>()): JsonValue {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') {
     return value;
   }

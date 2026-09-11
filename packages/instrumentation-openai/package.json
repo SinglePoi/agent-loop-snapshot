@@ -1,0 +1,21 @@
+{
+  "name": "@agent-loop-snapshot/instrumentation-openai",
+  "version": "0.1.0",
+  "private": true,
+  "files": [
+    "dist",
+    "!dist/**/*.test.*",
+    "!dist/tsconfig.tsbuildinfo"
+  ],
+  "type": "module",
+  "dependencies": {
+    "@agent-loop-snapshot/instrumentation": "workspace:*",
+    "openai": "7.15.0"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  }
+}

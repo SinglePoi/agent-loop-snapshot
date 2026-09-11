@@ -2,8 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
-import { Recorder, SnapshotWriter } from '@agent-loop-snapshot/recorder';
-import type { JsonValue, RuntimeDescriptor } from '@agent-loop-snapshot/schema';
+import {
+  Recorder,
+  SnapshotWriter,
+  createDefaultRedactionPipeline,
+} from '@agent-loop-snapshot/recorder';
+import type { EventId, JsonValue, RuntimeDescriptor } from '@agent-loop-snapshot/schema';
 
 import {
   currentInstrumentationScope,
@@ -99,6 +103,8 @@ export type InstrumentedRun = InstrumentationRun;
  */
 export interface InstrumentationIntegrationApi {
   currentRun(): InstrumentedRun | undefined;
+  /** The proven parent relationship for a call in the current async scope. */
+  currentParentIds(): readonly EventId[] | undefined;
   isSuppressed(): boolean;
   withSuppression<T>(operation: () => T): T;
   /** Track an SDK wrapper promise so telemetry.run() cannot close it early. */
@@ -267,6 +273,19 @@ class Controller implements InstrumentationController {
         }
         return scope.activeRun;
       },
+      currentParentIds: () => {
+        const scope = currentInstrumentationScope();
+        if (scope === undefined || scope.suppressed) {
+          return undefined;
+        }
+        if (
+          scope.allowedIntegrations !== undefined &&
+          !scope.allowedIntegrations.has(integration)
+        ) {
+          return undefined;
+        }
+        return scope.parentIds;
+      },
       isSuppressed: () => currentInstrumentationScope()?.suppressed === true,
       withSuppression: <T>(operation: () => T): T => runWithInstrumentationSuppression(operation),
       track: <T>(operation: Promise<T>): Promise<T> => {
@@ -369,7 +388,9 @@ class Controller implements InstrumentationController {
   private async createRun(options: { readonly input?: JsonValue }): Promise<InstrumentedRun> {
     const snapshotDirectory = await this.createRunDirectory();
     const writer = await SnapshotWriter.open(snapshotDirectory);
-    const recorder = new Recorder({ interceptors: [writer.asInterceptor()] });
+    const recorder = new Recorder({
+      interceptors: [createDefaultRedactionPipeline().asInterceptor(), writer.asInterceptor()],
+    });
     try {
       const run = await recorder.startRun({
         runtime: this.runtime,
@@ -453,3 +474,4 @@ export function initInstrumentation(
 }
 
 export * from './instrument.js';
+export * from './stream.js';

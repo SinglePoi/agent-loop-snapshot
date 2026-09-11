@@ -1,0 +1,21 @@
+{
+  "name": "@agent-loop-snapshot/instrumentation-anthropic",
+  "version": "0.1.0",
+  "private": true,
+  "files": [
+    "dist",
+    "!dist/**/*.test.*",
+    "!dist/tsconfig.tsbuildinfo"
+  ],
+  "type": "module",
+  "dependencies": {
+    "@agent-loop-snapshot/instrumentation": "workspace:*",
+    "@anthropic-ai/sdk": "0.125.0"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  }
+}
