@@ -1,6 +1,6 @@
 # 低侵入采集、OpenTelemetry 导入与外部平台导出开发计划
 
-更新时间：2026-09-11。状态：CAP-01 至 CAP-08 已完成；EXP-01 及其余导出任务待实现，交给 coding agent 执行。
+更新时间：2026-09-11。状态：CAP-01 至 CAP-08、EXP-01 至 EXP-04 已完成；EXP-05 及其余导出任务待实现，交给 coding agent 执行。
 
 本文替代原函数包装计划，保留文件路径。所有新增 API、命令和能力均为待实现目标，不能按已实现功能宣传。
 
@@ -325,6 +325,29 @@ flush/shutdown 有 deadline，超时保留队列并报告未发送数量；重�
 - 已新增三条可离线执行的示例：通用 `instrument()` 函数/工具包装、真实 OpenAI SDK 对本地 HTTP fixture 的自动采集，以及 OTLP JSON 导入。示例不需要真实 API key、付费请求或生产 trace；`pnpm run examples:check` 会执行三者。
 - README 已更新为 v0.2 观察快照语义，并说明入口选择、可见范围、固定支持版本、ESM/CJS 初始化与打包限制、流行为、strict/best-effort 故障模式、OTLP 导入边界及 observation-only 执行限制。未实现的外部导出配置被明确标为后续 EXP 工作。
 - release smoke 已覆盖打包消费者对通用包装、OpenAI integration 依赖图和 OTLP 导入的加载/离线闭环；新增 tarball 依赖随消费者安装，避免从 registry 错误拉取 workspace 包。
+
+**EXP-01 完成记录（2026-09-11）**
+
+- 已新增 ADR-0005，冻结 `@agent-loop-snapshot/otel-export` 的独立包边界、OTLP/HTTP 目标与凭据处理、内容策略、DAG/span 映射、映射损失及发送状态语义；Recorder、schema 与 replay 不反向依赖该包；
+- 公共契约固定为 `otel-export-1.0`，包括 endpoint/endpointEnv 二选一配置、仅环境变量引用的 headers、partial-success、未知送达、flush/shutdown 和不含凭据的报告类型。
+
+**EXP-02 完成记录（2026-09-11）**
+
+- `mapSnapshotToOtlp()` 已作为纯内存映射器实现：原生/SDK Run 映射为稳定 ID 的运行根 span 与配对调用 span；额外 DAG 父关系转换为 links 并报告损失，未配对调用保持 UNSET 且报告不完整；
+- OTel 导入快照优先保留合法 source trace/span ID、resource、scope 与 links，持续标记为 observation-only；默认 `metadata-only` 不发送模型/工具/状态/异常正文，显式 `redacted-content` 经过独立出站脱敏与字段长度限制；
+- `dryRunOtlpExport()` 只生成已过滤的 OTLP/HTTP JSON 与机器可读的字段丢弃、映射损失和观察限制报告，不联网、不入队、不解析凭据。
+
+**EXP-03 完成记录（2026-09-11）**
+
+- 已新增 `createOtlpHttpClient()`：仅发送 EXP-02 已过滤的 OTLP/HTTP JSON，不映射快照、不写本地队列、不重试模型或工具调用；endpoint 和 header 值只在发送时解析，header 配置只保存“HTTP header 名 → 环境变量名”的引用；
+- 固定使用 POST `application/json`、禁用重定向、默认 HTTPS（仅 loopback 测试允许 HTTP），限制响应为 4 MiB；200/`partialSuccess`、429/502/503/504、Retry-After、超时、取消、断连和无效响应分别映射为可审计的交付状态；
+- 本地 HTTP fixture 已验证鉴权、完整接受、partial success 不重试、429 重试、超时 `unknown_delivery`、401 拒绝和 302 拒绝。重试使用有界预算、指数退避和抖动，远端临时失败不会触发任何业务调用。
+
+**EXP-04 完成记录（2026-09-11）**
+
+- 已新增 `openOtlpPersistentQueue()`：按队列目录保存已过滤 request、span 数、目标别名、非敏感配置指纹、批次 ID 和尝试次数；新条目使用同步临时文件与原子发布，更新使用原子替换，凭据、endpoint 和原始快照不写入队列；
+- 队列支持条数/字节数/保留期限上限，容量或磁盘提交失败返回 `not_queued` 并保留源快照；成功或不可重试拒绝删除批次，`exhausted` / `unknown_delivery` 更新后保留，过期条目在入队或 flush 时清理；
+- `flush()` / `shutdown()` 采用单消费者文件锁、陈旧锁恢复、配置指纹隔离与 deadline；已覆盖持久化重启恢复、容量、配置变化不串写、过期、deadline 保留、并发锁和中断遗留锁恢复。
 
 CAP-06 可在 CAP-02 后独立实施；可由单个 coding agent 顺序完成，不要求委派或创建外部任务。
 

@@ -105,6 +105,12 @@ importers:
         specifier: 7.15.0
         version: 7.15.0
 
+  packages/otel-export:
+    dependencies:
+      '@agent-loop-snapshot/schema':
+        specifier: workspace:*
+        version: link:../schema
+
   packages/otel-import:
     dependencies:
       '@agent-loop-snapshot/schema':
