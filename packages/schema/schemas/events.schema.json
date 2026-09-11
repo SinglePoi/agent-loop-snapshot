@@ -362,6 +362,12 @@
         }
       ]
     },
+    "jsonObject": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/jsonValue"
+      }
+    },
     "runtimeDescriptor": {
       "type": "object",
       "required": ["name", "version"],
@@ -525,7 +531,18 @@
             "trace_id": { "type": "string", "minLength": 1 },
             "span_id": { "type": "string", "minLength": 1 },
             "name": { "type": "string", "minLength": 1 },
-            "status": { "enum": ["ok", "error", "unset"] }
+            "status": { "enum": ["ok", "error", "unset"] },
+            "start_time_unix_nano": { "type": "string", "pattern": "^[0-9]+$" },
+            "end_time_unix_nano": { "type": "string", "pattern": "^[0-9]+$" },
+            "parent_span_id": { "type": "string", "minLength": 1 },
+            "kind": { "type": "string" },
+            "status_message": { "type": "string" },
+            "resource": { "$ref": "#/$defs/jsonObject" },
+            "scope": { "$ref": "#/$defs/jsonObject" },
+            "attributes": { "$ref": "#/$defs/jsonObject" },
+            "events": { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+            "links": { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+            "semantic": { "enum": ["generic", "gen_ai_model", "gen_ai_tool"] }
           }
         }
       ]

@@ -8,6 +8,15 @@ importers:
 
   .:
     devDependencies:
+      '@agent-loop-snapshot/cli':
+        specifier: workspace:*
+        version: link:packages/cli
+      '@agent-loop-snapshot/instrumentation':
+        specifier: workspace:*
+        version: link:packages/instrumentation
+      '@agent-loop-snapshot/instrumentation-openai':
+        specifier: workspace:*
+        version: link:packages/instrumentation-openai
       '@eslint/js':
         specifier: ^9.39.1
         version: 9.39.5
@@ -17,6 +26,9 @@ importers:
       eslint:
         specifier: ^9.39.1
         version: 9.39.5(supports-color@7.1.0)
+      openai:
+        specifier: 7.15.0
+        version: 7.15.0
       prettier:
         specifier: ^3.6.2
         version: 3.9.6
@@ -32,6 +44,9 @@ importers:
       '@agent-loop-snapshot/graph':
         specifier: workspace:*
         version: link:../graph
+      '@agent-loop-snapshot/otel-import':
+        specifier: workspace:*
+        version: link:../otel-import
       '@agent-loop-snapshot/recorder':
         specifier: workspace:*
         version: link:../recorder
@@ -89,6 +104,12 @@ importers:
       openai:
         specifier: 7.15.0
         version: 7.15.0
+
+  packages/otel-import:
+    dependencies:
+      '@agent-loop-snapshot/schema':
+        specifier: workspace:*
+        version: link:../schema
 
   packages/recorder:
     dependencies:

@@ -144,6 +144,18 @@ export interface OtelSpanPayload {
   span_id: string;
   name: string;
   status: 'ok' | 'error' | 'unset';
+  /** Original OTLP timestamps remain decimal nanosecond strings to avoid precision loss. */
+  start_time_unix_nano?: string;
+  end_time_unix_nano?: string;
+  parent_span_id?: string;
+  kind?: string;
+  status_message?: string;
+  resource?: JsonObject;
+  scope?: JsonObject;
+  attributes?: JsonObject;
+  events?: JsonValue[];
+  links?: JsonValue[];
+  semantic?: 'generic' | 'gen_ai_model' | 'gen_ai_tool';
 }
 
 export interface ModelRequestedPayload {

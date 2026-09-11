@@ -6,6 +6,7 @@
     { "path": "packages/instrumentation" },
     { "path": "packages/instrumentation-openai" },
     { "path": "packages/instrumentation-anthropic" },
+    { "path": "packages/otel-import" },
     { "path": "packages/trace" },
     { "path": "packages/graph" },
     { "path": "packages/replay" },

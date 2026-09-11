@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { existsSync } from 'node:fs';
-import { basename, relative, resolve } from 'node:path';
+import { mkdir, readFile, stat } from 'node:fs/promises';
+import { basename, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -23,8 +24,14 @@ import {
   type TraceDiagnostic,
   type TraceSnapshot,
 } from '@agent-loop-snapshot/trace';
-import { Recorder, SnapshotWriter } from '@agent-loop-snapshot/recorder';
+import {
+  Recorder,
+  SnapshotWriter,
+  createDefaultRedactionPipeline,
+  type FieldRedactionRule,
+} from '@agent-loop-snapshot/recorder';
 import { MockReplayRunner } from '@agent-loop-snapshot/replay';
+import { importOtlpTraces, toObservationSnapshot } from '@agent-loop-snapshot/otel-import';
 
 export const cliPackageName = '@agent-loop-snapshot/cli' as const;
 export const cliVersion = '0.1.0' as const;
@@ -35,7 +42,7 @@ export const cliExitCodes = {
   validationFailed: 2,
 } as const;
 
-type CommandName = 'validate' | 'inspect' | 'graph' | 'replay';
+type CommandName = 'validate' | 'inspect' | 'graph' | 'replay' | 'import-otel';
 type OutputFormat = 'text' | 'json' | 'mermaid';
 type ReplayMode = 'mock';
 
@@ -111,6 +118,7 @@ interface ParsedCommand {
   readonly foldNoise: boolean;
   readonly replayMode?: ReplayMode;
   readonly outputDirectory?: string;
+  readonly inputFiles?: readonly string[];
 }
 
 class CliUsageError extends Error {
@@ -176,7 +184,8 @@ function parseCommand(argv: readonly string[]): ParsedCommand {
     commandValue !== 'validate' &&
     commandValue !== 'inspect' &&
     commandValue !== 'graph' &&
-    commandValue !== 'replay'
+    commandValue !== 'replay' &&
+    commandValue !== 'import-otel'
   ) {
     throw new CliUsageError(`Unknown command "${commandValue}".`);
   }
@@ -192,6 +201,7 @@ function parseCommand(argv: readonly string[]): ParsedCommand {
   let foldNoise = true;
   let replayMode: ReplayMode | undefined;
   let outputDirectory: string | undefined;
+  const inputFiles: string[] = [];
 
   for (let index = 1; index < argv.length; index += 1) {
     const argument = argv[index];
@@ -276,13 +286,23 @@ function parseCommand(argv: readonly string[]): ParsedCommand {
     if (argument.startsWith('-')) {
       throw new CliUsageError(`Unknown option "${argument}".`);
     }
+    if (commandValue === 'import-otel') {
+      inputFiles.push(argument);
+      continue;
+    }
     if (directory !== undefined) {
       throw new CliUsageError('Only one snapshot directory may be supplied.');
     }
     directory = argument;
   }
 
-  if (directory === undefined) {
+  if (commandValue === 'import-otel' && inputFiles.length === 0) {
+    throw new CliUsageError('import-otel requires at least one OTLP JSON file.');
+  }
+  if (commandValue === 'import-otel' && outputDirectory === undefined) {
+    throw new CliUsageError('import-otel requires --output <snapshot-directory>.');
+  }
+  if (commandValue !== 'import-otel' && directory === undefined) {
     throw new CliUsageError('A snapshot directory is required.');
   }
   if (commandValue === 'replay' && replayMode === undefined) {
@@ -305,8 +325,12 @@ function parseCommand(argv: readonly string[]): ParsedCommand {
   ) {
     throw new CliUsageError('Graph filters and noise folding options are only supported by graph.');
   }
-  if (commandValue !== 'replay' && (replayMode !== undefined || outputDirectory !== undefined)) {
-    throw new CliUsageError('--mode and --output are only supported by replay.');
+  if (
+    commandValue !== 'replay' &&
+    commandValue !== 'import-otel' &&
+    (replayMode !== undefined || outputDirectory !== undefined)
+  ) {
+    throw new CliUsageError('--mode and --output are only supported by replay or import-otel.');
   }
   if (minSequence !== undefined && maxSequence !== undefined && minSequence > maxSequence) {
     throw new CliUsageError('--min-sequence cannot be greater than --max-sequence.');
@@ -314,7 +338,7 @@ function parseCommand(argv: readonly string[]): ParsedCommand {
 
   return {
     name: commandValue,
-    directory: resolve(directory),
+    directory: resolve(commandValue === 'import-otel' ? outputDirectory! : directory!),
     format,
     graphKind,
     filter: {
@@ -327,6 +351,7 @@ function parseCommand(argv: readonly string[]): ParsedCommand {
     foldNoise,
     ...(replayMode === undefined ? {} : { replayMode }),
     ...(outputDirectory === undefined ? {} : { outputDirectory: resolve(outputDirectory) }),
+    ...(inputFiles.length === 0 ? {} : { inputFiles: inputFiles.map((file) => resolve(file)) }),
   };
 }
 
@@ -604,6 +629,145 @@ async function loadValidation(directory: string): Promise<{
   };
 }
 
+const maxOtlpInputFileBytes = 64 * 1024 * 1024;
+
+const importAttributePrefixes = [
+  '/attributes',
+  '/resource/attributes',
+  '/scope/attributes',
+  '/events/*/attributes',
+  '/links/*/attributes',
+] as const;
+
+const importSensitiveAttributeNames = [
+  'authorization',
+  'Authorization',
+  'api_key',
+  'apiKey',
+  'password',
+  'secret',
+  'token',
+] as const;
+
+const importRedactionRules: readonly FieldRedactionRule[] = importAttributePrefixes.flatMap(
+  (prefix) =>
+    importSensitiveAttributeNames.map((name) => ({
+      path: `${prefix}/${name}`,
+      category: name.toLowerCase() === 'authorization' ? 'authorization' : 'secret',
+      strategy: 'reference' as const,
+    })),
+);
+
+interface ImportedSnapshotReport {
+  readonly directory: string;
+  readonly source_trace_id: string;
+  readonly imported_span_count: number;
+  readonly completeness: string;
+  readonly limitations: readonly { readonly code: string; readonly message: string }[];
+}
+
+interface ImportOtelCliResult {
+  readonly snapshots: readonly ImportedSnapshotReport[];
+  readonly imported_span_count: number;
+  readonly rejected_span_count: number;
+  readonly duplicate_span_count: number;
+  readonly truncated_value_count: number;
+  readonly diagnostics: readonly unknown[];
+}
+
+async function readOtlpInputFiles(inputFiles: readonly string[]): Promise<unknown> {
+  const resourceSpans: unknown[] = [];
+  for (const inputFile of inputFiles) {
+    const metadata = await stat(inputFile);
+    if (!metadata.isFile()) {
+      throw new Error(`OTLP input "${inputFile}" is not a regular file.`);
+    }
+    if (metadata.size > maxOtlpInputFileBytes) {
+      throw new Error(
+        `OTLP input "${inputFile}" exceeds the ${String(maxOtlpInputFileBytes)} byte limit.`,
+      );
+    }
+    let document: unknown;
+    try {
+      document = JSON.parse(await readFile(inputFile, 'utf8')) as unknown;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown JSON parsing error.';
+      throw new Error(`Could not parse OTLP JSON input "${inputFile}": ${message}`);
+    }
+    if (!isRecord(document) || !Array.isArray(document.resourceSpans)) {
+      throw new Error(
+        `OTLP input "${inputFile}" must be an ExportTraceServiceRequest with resourceSpans.`,
+      );
+    }
+    resourceSpans.push(...document.resourceSpans);
+  }
+  return { resourceSpans };
+}
+
+async function importOtlpFiles(
+  inputFiles: readonly string[],
+  outputDirectory: string,
+): Promise<ImportOtelCliResult> {
+  const source = await readOtlpInputFiles(inputFiles);
+  const imported = importOtlpTraces(source, { profile: 'otel-genai-1.0' });
+  if (imported.traces.length === 0) {
+    return {
+      snapshots: [],
+      imported_span_count: imported.report.importedSpanCount,
+      rejected_span_count: imported.report.rejectedSpanCount,
+      duplicate_span_count: imported.report.duplicateSpanCount,
+      truncated_value_count: imported.report.truncatedValueCount,
+      diagnostics: imported.report.diagnostics,
+    };
+  }
+
+  await mkdir(outputDirectory, { recursive: true });
+  const pipeline = createDefaultRedactionPipeline({ fieldRules: importRedactionRules });
+  const snapshots: ImportedSnapshotReport[] = [];
+  for (const trace of imported.traces) {
+    const snapshot = toObservationSnapshot(trace);
+    const directory = join(outputDirectory, snapshot.manifest.run_id);
+    try {
+      await mkdir(directory);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new Error(
+          `Refusing to overwrite existing imported snapshot directory "${directory}".`,
+        );
+      }
+      throw error;
+    }
+    const writer = await SnapshotWriter.open(directory, { flushMode: 'event' });
+    try {
+      for (const event of snapshot.events) {
+        await writer.append(await pipeline.redactEvent(event));
+      }
+      await writer.commit(snapshot.manifest);
+    } finally {
+      await writer.close();
+    }
+    const validation = await validateSnapshotDirectory(directory);
+    if (!validation.valid) {
+      throw new Error(`Imported snapshot "${directory}" failed validation after persistence.`);
+    }
+    snapshots.push({
+      directory,
+      source_trace_id: trace.traceId,
+      imported_span_count: trace.spans.length,
+      completeness: trace.completeness,
+      limitations: trace.limitations,
+    });
+  }
+  return {
+    snapshots,
+    imported_span_count: imported.report.importedSpanCount,
+    rejected_span_count: imported.report.rejectedSpanCount,
+    duplicate_span_count: imported.report.duplicateSpanCount,
+    truncated_value_count: imported.report.truncatedValueCount,
+    diagnostics: imported.report.diagnostics,
+  };
+}
+
 function usage(command?: CommandName): string {
   if (command === 'validate') {
     return [
@@ -643,6 +807,14 @@ function usage(command?: CommandName): string {
       'Verified replay requires explicitly configured live adapters through the SDK.',
     ].join('\n');
   }
+  if (command === 'import-otel') {
+    return [
+      'Usage: alsnap import-otel <otlp-json-file> [more-otlp-json-files...] --output <snapshot-directory> [--json]',
+      '',
+      'Import OTLP/HTTP JSON traces as redacted, observation-only snapshots.',
+      'Each source trace creates one new snapshot directory; existing snapshots are never overwritten.',
+    ].join('\n');
+  }
   return [
     'Agent Loop Snapshot CLI',
     '',
@@ -653,6 +825,7 @@ function usage(command?: CommandName): string {
     '  inspect   Print a metadata-only run summary',
     '  graph     Export a causal DAG, call tree, or timeline',
     '  replay    Create a mock replay snapshot from recorded results',
+    '  import-otel  Import OTLP JSON as observation-only snapshots',
     '',
     'Global options: --help, --version, --json',
   ].join('\n');
@@ -675,7 +848,8 @@ export async function runCli(
       commandValue === 'validate' ||
       commandValue === 'inspect' ||
       commandValue === 'graph' ||
-      commandValue === 'replay'
+      commandValue === 'replay' ||
+      commandValue === 'import-otel'
         ? commandValue
         : undefined;
     io.stdout(`${usage(command)}\n`);
@@ -715,6 +889,46 @@ export async function runCli(
         writeDiagnosticsText(io, result.diagnostics);
       }
       return result.valid ? cliExitCodes.success : cliExitCodes.validationFailed;
+    }
+
+    if (command.name === 'import-otel') {
+      const inputFiles = command.inputFiles;
+      const outputDirectory = command.outputDirectory;
+      if (inputFiles === undefined || outputDirectory === undefined) {
+        throw new CliUsageError(
+          'import-otel requires at least one input file and --output <snapshot-directory>.',
+        );
+      }
+      const result = await importOtlpFiles(inputFiles, outputDirectory);
+      const valid = result.snapshots.length > 0;
+      if (command.format === 'json') {
+        writeJson(io, {
+          command: command.name,
+          valid,
+          output_directory: outputDirectory,
+          input_files: inputFiles,
+          snapshots: result.snapshots,
+          report: {
+            imported_span_count: result.imported_span_count,
+            rejected_span_count: result.rejected_span_count,
+            duplicate_span_count: result.duplicate_span_count,
+            truncated_value_count: result.truncated_value_count,
+            diagnostics: result.diagnostics,
+          },
+        });
+      } else {
+        io.stdout(`${valid ? 'IMPORTED' : 'NO_VALID_TRACES'}\n`);
+        io.stdout(`Output: ${outputDirectory}\n`);
+        result.snapshots.forEach((snapshot) => {
+          io.stdout(
+            `- ${snapshot.source_trace_id}: ${snapshot.directory} (${String(snapshot.imported_span_count)} spans, ${snapshot.completeness})\n`,
+          );
+        });
+        io.stdout(
+          `Report: ${String(result.imported_span_count)} imported, ${String(result.rejected_span_count)} rejected, ${String(result.duplicate_span_count)} deduplicated\n`,
+        );
+      }
+      return valid ? cliExitCodes.success : cliExitCodes.validationFailed;
     }
 
     const snapshot = await loadTraceSnapshot(command.directory);

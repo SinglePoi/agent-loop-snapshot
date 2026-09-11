@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "@agent-loop-snapshot/graph": "workspace:*",
+    "@agent-loop-snapshot/otel-import": "workspace:*",
     "@agent-loop-snapshot/recorder": "workspace:*",
     "@agent-loop-snapshot/replay": "workspace:*",
     "@agent-loop-snapshot/schema": "workspace:*",

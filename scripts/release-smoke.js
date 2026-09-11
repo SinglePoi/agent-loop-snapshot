@@ -105,6 +105,11 @@ export async function runReleaseSmoke() {
       '@agent-loop-snapshot/cli': packageFile('agent-loop-snapshot-cli'),
       '@agent-loop-snapshot/example-runtime': packageFile('agent-loop-snapshot-example-runtime'),
       '@agent-loop-snapshot/graph': packageFile('agent-loop-snapshot-graph'),
+      '@agent-loop-snapshot/instrumentation': packageFile('agent-loop-snapshot-instrumentation'),
+      '@agent-loop-snapshot/instrumentation-openai': packageFile(
+        'agent-loop-snapshot-instrumentation-openai',
+      ),
+      '@agent-loop-snapshot/otel-import': packageFile('agent-loop-snapshot-otel-import'),
       '@agent-loop-snapshot/recorder': packageFile('agent-loop-snapshot-recorder'),
       '@agent-loop-snapshot/replay': packageFile('agent-loop-snapshot-replay'),
       '@agent-loop-snapshot/schema': packageFile('agent-loop-snapshot-schema'),
@@ -133,11 +138,22 @@ export async function runReleaseSmoke() {
 
     await writeFile(
       join(consumer, 'smoke.mjs'),
-      `import { runCli } from '@agent-loop-snapshot/cli';\n
+      `import { mkdir, writeFile } from 'node:fs/promises';\n
+import { dirname, join } from 'node:path';\n
+import { runCli } from '@agent-loop-snapshot/cli';\n
+import { instrument } from '@agent-loop-snapshot/instrumentation';\n
+import { openAIIntegration } from '@agent-loop-snapshot/instrumentation-openai';\n
 const [fixture, output] = process.argv.slice(2);\n
 if (fixture === undefined || output === undefined) {\n  throw new Error('Fixture and output paths are required.');\n}\n
 const io = { stdout: () => undefined, stderr: () => undefined };\n
-const results = await Promise.all([\n  runCli(['validate', fixture], io),\n  runCli(['graph', fixture, '--format', 'mermaid'], io),\n  runCli(['replay', fixture, '--mode', 'mock', '--output', output], io),\n]);\n
+const generic = instrument({\n  snapshotDir: join(dirname(output), 'generic'),\n  runtime: { name: 'release-smoke', version: '1.0.0' },\n  model: { name: 'fixture', call: async (prompt) => prompt },\n  tools: {},\n});\n
+await generic.run({ input: { goal: 'tarball smoke' } }, async ({ model, checkpoint }) => {\n  const value = await model.call('ok');\n  await checkpoint({ value });\n  return value;\n});\n
+// Loading this integration verifies the packed SDK dependency graph without contacting an API.\n
+void openAIIntegration({ recording: 'metadata-only' });\n
+const otlpInput = join(dirname(output), 'trace.json');\n
+await mkdir(dirname(output), { recursive: true });\n
+await writeFile(otlpInput, JSON.stringify({ resourceSpans: [{ scopeSpans: [{ spans: [{ traceId: '11111111111111111111111111111111', spanId: '2222222222222222', name: 'smoke', startTimeUnixNano: '1' }] }] }] }));\n
+const results = await Promise.all([\n  runCli(['validate', fixture], io),\n  runCli(['graph', fixture, '--format', 'mermaid'], io),\n  runCli(['replay', fixture, '--mode', 'mock', '--output', output], io),\n  runCli(['import-otel', otlpInput, '--output', join(dirname(output), 'otel-import')], io),\n]);\n
 if (results.some((result) => result !== 0)) {\n  throw new Error(\`Installed CLI smoke failed: \${results.join(', ')}.\`);\n}\n`,
     );
 
@@ -155,7 +171,7 @@ if (results.some((result) => result !== 0)) {\n  throw new Error(\`Installed CLI
       consumer,
     );
     console.log(
-      'Release smoke passed: packed packages installed cleanly, then validate, graph, and Mock Replay completed.',
+      'Release smoke passed: packed packages installed cleanly, then generic instrumentation, SDK integration loading, OTLP import, validate, graph, and Mock Replay completed.',
     );
   } finally {
     await rm(output, { recursive: true, force: true });
