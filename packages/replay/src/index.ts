@@ -6,6 +6,7 @@ export interface ReplayRunner {
 
 export * from './adapters.js';
 export * from './correlation.js';
+export * from './execution-gate.js';
 export * from './compiler.js';
 export * from './mock.js';
 export * from './policy.js';

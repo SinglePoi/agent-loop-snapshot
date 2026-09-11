@@ -30,6 +30,7 @@ import {
   type ReplayPolicyOptions,
   createReplayPolicyAction,
 } from './policy.js';
+import { assessTraceExecution } from './execution-gate.js';
 
 type VerifiedCallKind = 'model' | 'tool';
 
@@ -99,6 +100,7 @@ export interface VerifiedReplayDifference {
 
 export type VerifiedReplayDiagnosticCode =
   | 'SOURCE_TRACE_INVALID'
+  | 'SOURCE_TRACE_OBSERVATION_ONLY'
   | 'SOURCE_ARTIFACT_INVALID'
   | 'INVALID_SOURCE_CALL'
   | 'INVALID_SOURCE_RESPONSE'
@@ -659,6 +661,14 @@ export class VerifiedReplayRunner {
         severity: 'error',
         code: 'SOURCE_TRACE_INVALID',
         message: 'Verified replay requires a valid source TraceSnapshot.',
+      });
+    }
+    const eligibility = assessTraceExecution(this.source);
+    if (eligibility.eligibility === 'observation_only') {
+      diagnostics.push({
+        severity: 'error',
+        code: 'SOURCE_TRACE_OBSERVATION_ONLY',
+        message: `Verified replay is blocked: ${eligibility.reason}`,
       });
     }
     const sourceSchedule = callsAndResponses(this.source);

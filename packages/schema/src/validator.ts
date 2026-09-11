@@ -15,6 +15,7 @@ import {
   type WorkflowDocument,
   type WorkflowNodeId,
 } from './index.js';
+import { isSupportedSnapshotSchemaVersion, snapshotSchemaVersion } from './protocol.js';
 import {
   SnapshotPathError,
   createSnapshotPathBoundary,
@@ -22,7 +23,6 @@ import {
   type SnapshotPathBoundary,
 } from './snapshot-path.js';
 
-const snapshotSchemaVersion = '0.1.0';
 export const defaultSnapshotDirectoryValidationLimits = {
   maxEventFileBytes: 64 * 1024 * 1024,
   maxArtifactBytes: 64 * 1024 * 1024,
@@ -70,6 +70,7 @@ const knownEventTypes = new Set<EventType>([
   'run.started',
   'run.completed',
   'run.failed',
+  'run.observed',
   'model.requested',
   'model.completed',
   'model.failed',
@@ -80,6 +81,7 @@ const knownEventTypes = new Set<EventType>([
   'state.changed',
   'checkpoint.created',
   'verification.completed',
+  'otel.span',
 ]);
 
 const schemaDirectory = resolve(dirname(fileURLToPath(import.meta.url)), '../schemas');
@@ -381,7 +383,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function isArtifactReference(value: unknown): value is ArtifactReference {
   return (
     isRecord(value) &&
-    value.schema_version === snapshotSchemaVersion &&
+    isSupportedSnapshotSchemaVersion(value.schema_version) &&
     typeof value.digest === 'string' &&
     typeof value.media_type === 'string' &&
     typeof value.byte_length === 'number'
@@ -495,9 +497,41 @@ function semanticDiagnostics(document: SnapshotDocument): ValidationDiagnostic[]
         source: 'events',
       });
     }
+    if (
+      manifest !== undefined &&
+      typeof manifest.schema_version === 'string' &&
+      event.schema_version !== manifest.schema_version
+    ) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'SCHEMA_VERSION_MISMATCH',
+        path: `${eventPath}/schema_version`,
+        message: 'Event schema_version does not match manifest schema_version.',
+        source: 'events',
+      });
+    }
   });
 
   if (manifest !== undefined) {
+    if (manifest.schema_version === snapshotSchemaVersion) {
+      if (manifest.completeness === 'partial') {
+        diagnostics.push({
+          severity: 'warning',
+          code: 'SNAPSHOT_PARTIAL',
+          path: '/manifest/completeness',
+          message: 'Snapshot is structurally valid but its recording is partial.',
+          source: 'manifest',
+        });
+      } else if (manifest.completeness === 'unknown') {
+        diagnostics.push({
+          severity: 'warning',
+          code: 'SNAPSHOT_COMPLETENESS_UNKNOWN',
+          path: '/manifest/completeness',
+          message: 'Snapshot is structurally valid but recording completeness is unknown.',
+          source: 'manifest',
+        });
+      }
+    }
     if (manifest.event_count !== events.length) {
       diagnostics.push({
         severity: 'error',
@@ -547,6 +581,19 @@ function semanticDiagnostics(document: SnapshotDocument): ValidationDiagnostic[]
         code: 'CHECKPOINT_RUN_ID_MISMATCH',
         path: `${checkpointPath}/run_id`,
         message: 'Checkpoint run_id does not match manifest run_id.',
+        source: 'checkpoints',
+      });
+    }
+    if (
+      typeof checkpoint.schema_version === 'string' &&
+      manifest !== undefined &&
+      checkpoint.schema_version !== manifest.schema_version
+    ) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'SCHEMA_VERSION_MISMATCH',
+        path: `${checkpointPath}/schema_version`,
+        message: 'Checkpoint schema_version does not match manifest schema_version.',
         source: 'checkpoints',
       });
     }

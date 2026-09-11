@@ -5,6 +5,8 @@ import { basename, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  assessSnapshotExecution,
+  readSnapshotObservationMetadata,
   validateSnapshotDirectory,
   type SnapshotManifest,
   type ValidationDiagnostic,
@@ -77,6 +79,10 @@ export interface InspectSummary {
   readonly run_id?: string;
   readonly run_state?: string;
   readonly terminal_status?: string | null;
+  readonly source?: string;
+  readonly completeness?: string;
+  readonly limitations?: readonly { readonly code: string; readonly message: string }[];
+  readonly execution_eligibility?: string;
   readonly runtime?: SnapshotManifest['runtime'];
   readonly event_count: number;
   readonly checkpoint_count: number;
@@ -406,6 +412,14 @@ function writeInspectText(
   if (summary.runtime !== undefined) {
     io.stdout(`Runtime: ${summary.runtime.name}@${summary.runtime.version}\n`);
   }
+  io.stdout(
+    `Source: ${summary.source ?? 'unknown'}; completeness: ${summary.completeness ?? 'unknown'}; execution: ${summary.execution_eligibility ?? 'unknown'}\n`,
+  );
+  if ((summary.limitations?.length ?? 0) > 0) {
+    io.stdout(
+      `Limitations: ${summary.limitations!.map((limitation) => limitation.code).join(', ')}\n`,
+    );
+  }
   io.stdout(`Events: ${String(summary.event_count)}\n`);
   io.stdout(`Checkpoints: ${String(summary.checkpoint_count)}\n`);
   io.stdout(
@@ -488,6 +502,8 @@ export function createInspectSummary(snapshot: TraceSnapshot): InspectSummary {
     0,
   );
   const runtime = snapshot.manifest?.runtime;
+  const observation = readSnapshotObservationMetadata(snapshot.manifest);
+  const eligibility = assessSnapshotExecution(observation);
 
   return {
     ...(snapshot.manifest?.run_id === undefined ? {} : { run_id: snapshot.manifest.run_id }),
@@ -498,6 +514,10 @@ export function createInspectSummary(snapshot: TraceSnapshot): InspectSummary {
       ? {}
       : { terminal_status: snapshot.manifest.terminal_status }),
     ...(runtime === undefined ? {} : { runtime }),
+    source: observation.source,
+    completeness: observation.completeness,
+    limitations: observation.limitations,
+    execution_eligibility: eligibility.eligibility,
     event_count: snapshot.events.length,
     checkpoint_count: snapshot.checkpoints.length,
     artifact_count: snapshot.artifacts.size,
@@ -726,6 +746,30 @@ export async function runCli(
         }
         return cliExitCodes.validationFailed;
       }
+      const eligibility = assessSnapshotExecution(
+        readSnapshotObservationMetadata(snapshot.manifest),
+      );
+      if (eligibility.eligibility === 'observation_only') {
+        const diagnostic = {
+          severity: 'error' as const,
+          code: 'SOURCE_TRACE_OBSERVATION_ONLY',
+          path: '/manifest',
+          message: `Replay is blocked: ${eligibility.reason}`,
+          source: 'manifest',
+        };
+        if (command.format === 'json') {
+          writeJson(io, {
+            command: command.name,
+            directory: command.directory,
+            valid: false,
+            diagnostics: [diagnostic],
+          });
+        } else {
+          io.stdout('OBSERVATION_ONLY\n');
+          writeDiagnosticsText(io, [diagnostic]);
+        }
+        return cliExitCodes.validationFailed;
+      }
 
       const writer = await SnapshotWriter.open(outputDirectory, { flushMode: 'event' });
       try {
@@ -778,6 +822,8 @@ export async function runCli(
       foldNoise: command.foldNoise,
     });
     const diagnostics = snapshotJsonDiagnostics(command.directory, snapshot);
+    const observation = readSnapshotObservationMetadata(snapshot.manifest);
+    const eligibility = assessSnapshotExecution(observation);
     if (command.format === 'json') {
       writeJson(io, {
         command: command.name,
@@ -785,12 +831,21 @@ export async function runCli(
         valid: snapshot.valid,
         projection: command.graphKind,
         graph: projection,
+        observation: {
+          source: observation.source,
+          completeness: observation.completeness,
+          limitations: observation.limitations,
+          execution_eligibility: eligibility.eligibility,
+        },
         diagnostics,
       });
     } else if (command.format === 'text') {
       io.stdout(`Graph: ${command.graphKind}\n`);
       io.stdout(`Nodes: ${String(projection.nodes.length)}\n`);
       io.stdout(`Edges: ${String(projection.edges.length)}\n`);
+      io.stdout(
+        `Source: ${observation.source}; completeness: ${observation.completeness}; execution: ${eligibility.eligibility}\n`,
+      );
       projection.nodes.forEach((node) => {
         io.stdout(`- ${node.label} [${node.eventIds.join(', ')}]\n`);
       });

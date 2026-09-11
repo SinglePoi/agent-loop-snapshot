@@ -1,13 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agent-loop-snapshot.dev/schema/0.1.0/artifact-reference.schema.json",
+  "$id": "https://agent-loop-snapshot.dev/schema/0.2.0/artifact-reference.schema.json",
   "title": "Agent Loop Snapshot Artifact Reference",
   "description": "A content-addressed reference used when an inline value is too large to keep in an event or checkpoint.",
   "type": "object",
   "required": ["schema_version", "digest", "media_type", "byte_length"],
   "properties": {
     "schema_version": {
-      "const": "0.1.0"
+      "enum": ["0.1.0", "0.2.0"]
     },
     "digest": {
       "type": "string",

@@ -4,7 +4,7 @@ import { readFile, readdir } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 
 import {
-  snapshotSchemaVersion,
+  isSupportedSnapshotSchemaVersion,
   SnapshotPathError,
   createSnapshotPathBoundary,
   inspectSnapshotPath,
@@ -160,7 +160,7 @@ function isEventEnvelope(value: unknown): value is EventEnvelope<string, unknown
 function isArtifactReference(value: unknown): value is ArtifactReference {
   return (
     isRecord(value) &&
-    value.schema_version === snapshotSchemaVersion &&
+    isSupportedSnapshotSchemaVersion(value.schema_version) &&
     typeof value.digest === 'string' &&
     /^[a-f0-9]{64}$/.test(value.digest) &&
     typeof value.media_type === 'string' &&

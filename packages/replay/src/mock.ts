@@ -20,6 +20,7 @@ import {
   createReplayPolicyAction,
 } from './policy.js';
 import { createRecordedReplayAdapterSet } from './recorded.js';
+import { assessTraceExecution } from './execution-gate.js';
 
 type MockReplayCallKind = 'model' | 'tool';
 
@@ -47,6 +48,7 @@ type SourceReplayCall = MockReplayCall & {
 
 export type MockReplayDiagnosticCode =
   | 'SOURCE_TRACE_INVALID'
+  | 'SOURCE_TRACE_OBSERVATION_ONLY'
   | 'SOURCE_ARTIFACT_INVALID'
   | 'SOURCE_STATE_UNAVAILABLE'
   | 'RECORDED_ADAPTER_INVALID'
@@ -429,6 +431,18 @@ export class MockReplayRunner {
         code: 'SOURCE_TRACE_INVALID',
         message: 'Mock replay requires a valid source TraceSnapshot.',
       });
+    }
+    const eligibility = assessTraceExecution(this.source);
+    if (eligibility.eligibility === 'observation_only') {
+      diagnostics.push({
+        severity: 'error',
+        code: 'SOURCE_TRACE_OBSERVATION_ONLY',
+        message: `Mock replay is blocked: ${eligibility.reason}`,
+      });
+    }
+
+    if (diagnostics.length > 0) {
+      return this.fail(run, diagnostics, sourceId);
     }
 
     const recorded = createRecordedReplayAdapterSet(this.source);

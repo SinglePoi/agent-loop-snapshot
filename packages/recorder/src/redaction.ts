@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { snapshotSchemaVersion } from '@agent-loop-snapshot/schema/protocol';
+import { isSupportedSnapshotSchemaVersion } from '@agent-loop-snapshot/schema/protocol';
 import type {
   ArtifactReference,
   Checkpoint,
@@ -105,7 +105,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function isArtifactReference(value: unknown): value is ArtifactReference {
   return (
     isRecord(value) &&
-    value.schema_version === snapshotSchemaVersion &&
+    isSupportedSnapshotSchemaVersion(value.schema_version) &&
     typeof value.digest === 'string' &&
     typeof value.media_type === 'string' &&
     typeof value.byte_length === 'number'

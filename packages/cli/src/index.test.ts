@@ -1,5 +1,6 @@
 import { strict as assert } from 'node:assert';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -65,8 +66,8 @@ test('validate returns exit code 2 and structured diagnostics for an invalid sna
   assert.deepEqual(
     output.diagnostics.map(({ code, path }) => ({ code, path })),
     [
-      { code: 'SCHEMA_CONST', path: '/manifest/schema_version' },
-      { code: 'SCHEMA_CONST', path: '/events/0/schema_version' },
+      { code: 'SCHEMA_ENUM', path: '/manifest/schema_version' },
+      { code: 'SCHEMA_ENUM', path: '/events/0/schema_version' },
     ],
   );
 });
@@ -159,6 +160,55 @@ test('replay creates a valid mock replay snapshot', async () => {
     });
   } finally {
     await rm(outputDirectory, { recursive: true, force: true });
+  }
+});
+
+test('CLI replay refuses a valid observation-only snapshot before creating output', async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), 'alsnap-observation-cli-'));
+  const source = join(temporaryRoot, 'source');
+  const output = join(temporaryRoot, 'output');
+  try {
+    await mkdir(source);
+    const manifest = JSON.parse(
+      await readFile(join(fixtureDirectory, 'manifest.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    const events = (await readFile(join(fixtureDirectory, 'events.jsonl'), 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => ({ ...JSON.parse(line), schema_version: '0.2.0' }));
+    await writeFile(
+      join(source, 'manifest.json'),
+      `${JSON.stringify(
+        {
+          ...manifest,
+          schema_version: '0.2.0',
+          source: 'otel-import',
+          completeness: 'complete',
+          limitations: [],
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    await writeFile(
+      join(source, 'events.jsonl'),
+      `${events.map((event) => JSON.stringify(event)).join('\n')}\n`,
+    );
+
+    const captured = captureIo();
+    const exitCode = await runCli(
+      ['replay', source, '--mode', 'mock', '--output', output, '--json'],
+      captured.io,
+    );
+    const response = JSON.parse(captured.stdout.join('')) as {
+      diagnostics: Array<{ code: string }>;
+    };
+
+    assert.equal(exitCode, cliExitCodes.validationFailed);
+    assert.equal(response.diagnostics[0]?.code, 'SOURCE_TRACE_OBSERVATION_ONLY');
+    assert.equal(existsSync(output), false);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
   }
 });
 

@@ -14,7 +14,10 @@ import type {
   StateChangedPayload,
 } from '@agent-loop-snapshot/schema';
 
-import { snapshotSchemaVersion } from '@agent-loop-snapshot/schema/protocol';
+import {
+  isSupportedSnapshotSchemaVersion,
+  snapshotSchemaVersion,
+} from '@agent-loop-snapshot/schema/protocol';
 
 export type RecoverableState = JsonObject;
 
@@ -89,7 +92,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function isArtifactReference(value: unknown): value is ArtifactReference {
   return (
     isRecord(value) &&
-    value.schema_version === snapshotSchemaVersion &&
+    isSupportedSnapshotSchemaVersion(value.schema_version) &&
     typeof value.digest === 'string' &&
     typeof value.media_type === 'string' &&
     typeof value.byte_length === 'number'
@@ -390,7 +393,7 @@ function validCheckpointShape(value: unknown): value is Checkpoint {
     return false;
   }
   return (
-    value.schema_version === snapshotSchemaVersion &&
+    isSupportedSnapshotSchemaVersion(value.schema_version) &&
     typeof value.checkpoint_id === 'string' &&
     typeof value.run_id === 'string' &&
     typeof value.created_at === 'string' &&

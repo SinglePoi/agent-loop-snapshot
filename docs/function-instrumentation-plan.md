@@ -1,6 +1,6 @@
 # 低侵入采集、OpenTelemetry 导入与外部平台导出开发计划
 
-更新时间：2026-09-11。状态：待实现，交给 coding agent 执行。
+更新时间：2026-09-11。状态：CAP-01、CAP-02 已完成，其余任务待实现，交给 coding agent 执行。
 
 本文替代原函数包装计划，保留文件路径。所有新增 API、命令和能力均为待实现目标，不能按已实现功能宣传。
 
@@ -269,6 +269,18 @@ flush/shutdown 有 deadline，超时保留队列并报告未发送数量；重�
 | EXP-04 | 有界持久化队列、恢复、锁与 flush/shutdown | EXP-03 | 中断可恢复，目标不串写，故障不影响业务 |
 | EXP-05 | SDK 运行结束自动发送、CLI export/resume | CAP-03、CAP-04、EXP-04 | 两种实时入口及已有快照均可发送，业务不被重跑 |
 | EXP-06 | Collector 端到端、平台指南、打包与回归 | CAP-08、EXP-05 | 本地完整验证、兼容矩阵、示例和 tarball 通过 |
+
+**CAP-01 完成记录（2026-09-11）**
+
+- 已新增 ADR-0004，冻结观察快照的来源、完整度、限制原因、观察终态、状态 hash 与执行门禁语义；
+- `@agent-loop-snapshot/schema` 已导出公共观察元数据类型和保守的执行资格评估；该评估不构成授权，OTLP 导入固定为 observation-only；
+- 持久化 schema、迁移、查看输出与实际执行门禁仍属于 CAP-02，尚未实现。
+
+**CAP-02 完成记录（2026-09-11）**
+
+- Snapshot 协议已升级到 `0.2.0`；新 manifest 持久化 `source`、`completeness` 与限制原因，`run.observed` / `otel.span` 用于不含可恢复状态的观察记录；
+- `0.1.0` 夹具继续可读和校验，迁移以新目录输出 `0.2.0` 并补充原生来源元数据；`partial` / `unknown` 快照结构有效时保留为 warning；
+- inspect 与图的文本/JSON 输出展示来源、完整度、限制和执行资格；CLI replay、Mock Replay、Verified Replay、Trace Compiler 均拒绝 observation-only 记录。
 
 CAP-06 可在 CAP-02 后独立实施；可由单个 coding agent 顺序完成，不要求委派或创建外部任务。
 

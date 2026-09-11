@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agent-loop-snapshot.dev/schema/0.1.0/checkpoint.schema.json",
+  "$id": "https://agent-loop-snapshot.dev/schema/0.2.0/checkpoint.schema.json",
   "title": "Agent Loop Snapshot Checkpoint",
   "description": "A full recoverable state snapshot associated with one event boundary.",
   "type": "object",
@@ -16,7 +16,7 @@
   ],
   "properties": {
     "schema_version": {
-      "const": "0.1.0"
+      "enum": ["0.1.0", "0.2.0"]
     },
     "checkpoint_id": {
       "$ref": "#/$defs/checkpointId"
@@ -69,7 +69,7 @@
       "required": ["schema_version", "digest", "media_type", "byte_length"],
       "properties": {
         "schema_version": {
-          "const": "0.1.0"
+          "enum": ["0.1.0", "0.2.0"]
         },
         "digest": {
           "type": "string",

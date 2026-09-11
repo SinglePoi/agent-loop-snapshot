@@ -1,6 +1,6 @@
 import {
-  snapshotSchemaVersion,
   validateWorkflow,
+  workflowSchemaVersion,
   type EventEnvelope,
   type JsonSchema,
   type SideEffectLevel,
@@ -10,8 +10,11 @@ import {
 } from '@agent-loop-snapshot/schema';
 import type { TraceSnapshot } from '@agent-loop-snapshot/trace';
 
+import { assessTraceExecution } from './execution-gate.js';
+
 export type TraceCompilerDiagnosticCode =
   | 'SOURCE_TRACE_INVALID'
+  | 'SOURCE_TRACE_OBSERVATION_ONLY'
   | 'MISSING_RUN_STARTED'
   | 'NO_COMPILABLE_CALLS'
   | 'GENERATED_WORKFLOW_INVALID';
@@ -265,6 +268,16 @@ export function compileTraceToWorkflow(trace: TraceSnapshot): TraceCompilationRe
     return { sourceMap, report, diagnostics };
   }
 
+  const eligibility = assessTraceExecution(trace);
+  if (eligibility.eligibility === 'observation_only') {
+    diagnostics.push({
+      severity: 'error',
+      code: 'SOURCE_TRACE_OBSERVATION_ONLY',
+      message: `Trace compilation is blocked: ${eligibility.reason}`,
+    });
+    return { sourceMap, report, diagnostics };
+  }
+
   const runStarted = trace.events.find((event) => event.type === 'run.started');
   if (runStarted === undefined) {
     diagnostics.push({
@@ -355,7 +368,7 @@ export function compileTraceToWorkflow(trace: TraceSnapshot): TraceCompilationRe
 
   const lastNode = nodes[nodes.length - 1]!;
   const workflow: WorkflowDocument = {
-    schema_version: snapshotSchemaVersion,
+    schema_version: workflowSchemaVersion,
     workflow_type: 'agent-workflow',
     workflow_id: workflowId(trace),
     name: `Compiled ${trace.manifest?.runtime.name ?? 'agent'} workflow`,

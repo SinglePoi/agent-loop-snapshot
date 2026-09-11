@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agent-loop-snapshot.dev/schema/0.1.0/manifest.schema.json",
+  "$id": "https://agent-loop-snapshot.dev/schema/0.2.0/manifest.schema.json",
   "title": "Agent Loop Snapshot Manifest",
   "description": "The atomically committed metadata for one run snapshot.",
   "type": "object",
@@ -18,7 +18,7 @@
   ],
   "properties": {
     "schema_version": {
-      "const": "0.1.0"
+      "enum": ["0.1.0", "0.2.0"]
     },
     "snapshot_type": {
       "const": "run-snapshot"
@@ -38,10 +38,20 @@
       "enum": ["running", "finished", "incomplete"]
     },
     "terminal_status": {
-      "enum": ["completed", "failed", "aborted", null]
+      "enum": ["completed", "failed", "aborted", "unknown", null]
     },
     "runtime": {
       "$ref": "#/$defs/runtimeDescriptor"
+    },
+    "source": {
+      "enum": ["native", "sdk", "otel-import"]
+    },
+    "completeness": {
+      "enum": ["unknown", "partial", "complete"]
+    },
+    "limitations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/limitation" }
     },
     "last_sequence": {
       "type": "integer",
@@ -60,6 +70,20 @@
     }
   },
   "allOf": [
+    {
+      "if": {
+        "properties": { "schema_version": { "const": "0.2.0" } },
+        "required": ["schema_version"]
+      },
+      "then": {
+        "required": ["source", "completeness", "limitations"],
+        "properties": {
+          "source": true,
+          "completeness": true,
+          "limitations": true
+        }
+      }
+    },
     {
       "if": {
         "properties": {
@@ -111,7 +135,7 @@
             "format": "date-time"
           },
           "terminal_status": {
-            "enum": ["completed", "failed", "aborted"]
+            "enum": ["completed", "failed", "aborted", "unknown"]
           }
         }
       }
@@ -144,6 +168,32 @@
         }
       },
       "additionalProperties": true
+    },
+    "limitation": {
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": {
+        "code": {
+          "enum": [
+            "recording_failed",
+            "drain_timed_out",
+            "unpaired_call",
+            "payload_omitted",
+            "payload_truncated",
+            "stream_not_consumed",
+            "stream_ended_early",
+            "missing_root",
+            "missing_parent",
+            "sampled_or_dropped",
+            "unsupported_semantics",
+            "invalid_source_data",
+            "unknown_side_effect",
+            "final_state_unavailable"
+          ]
+        },
+        "message": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": true
