@@ -14,14 +14,18 @@ import type {
   JsonObject,
   JsonValue,
   RunId,
+  RunObservedPayload,
   RunStartedPayload,
   RuntimeDescriptor,
+  SnapshotCompleteness,
+  SnapshotLimitation,
   SnapshotManifest,
+  SnapshotSource,
 } from '@agent-loop-snapshot/schema';
 
 export const recorderPackageName = '@agent-loop-snapshot/recorder' as const;
 
-export type RecorderRunStatus = 'running' | 'completed' | 'failed';
+export type RecorderRunStatus = 'running' | 'completed' | 'failed' | 'observed';
 
 export interface RecorderClock {
   now(): Date;
@@ -68,6 +72,10 @@ export interface StartRunOptions {
   input?: JsonValue | ArtifactReference;
   actor?: string;
   security?: EventSecurity;
+  /** Native is the default. SDK recording must explicitly identify itself. */
+  source?: Exclude<SnapshotSource, 'otel-import'>;
+  completeness?: SnapshotCompleteness;
+  limitations?: readonly SnapshotLimitation[];
 }
 
 export interface EventContext {
@@ -109,6 +117,11 @@ export interface CheckpointInput {
   context?: EventContext;
 }
 
+export interface RunLimitationInput {
+  code: SnapshotLimitation['code'];
+  message: string;
+}
+
 export class RecorderError extends Error {
   constructor(
     readonly code: string,
@@ -130,6 +143,9 @@ interface RunRecord {
   readonly runId: RunId;
   readonly actor: string;
   readonly runtime: RuntimeDescriptor;
+  readonly source: Exclude<SnapshotSource, 'otel-import'>;
+  completeness: SnapshotCompleteness;
+  limitations: SnapshotLimitation[];
   readonly createdAt: Date;
   readonly startedMonotonic: number;
   readonly startedEvent: EventEnvelope<'run.started', RunStartedPayload>;
@@ -160,6 +176,7 @@ const reservedEventTypes = new Set([
   'run.started',
   'run.completed',
   'run.failed',
+  'run.observed',
   'checkpoint.created',
 ]);
 
@@ -240,6 +257,9 @@ export class Recorder {
       runId,
       actor,
       runtime: options.runtime,
+      source: options.source ?? 'native',
+      completeness: options.completeness ?? 'complete',
+      limitations: options.limitations?.map((limitation) => ({ ...limitation })) ?? [],
       createdAt,
       startedMonotonic,
       startedEvent: undefined as unknown as EventEnvelope<'run.started', RunStartedPayload>,
@@ -361,6 +381,39 @@ export class Recorder {
     });
   }
 
+  /**
+   * Finishes a run that has observable lifecycle evidence but no safe claim to
+   * a reconstructible final state. This is intentionally distinct from
+   * completeRun, whose hash is an execution-relevant contract.
+   */
+  observeRun(
+    run: RunHandle | RunId,
+    payload: RunObservedPayload,
+    options: LifecycleEventOptions = {},
+  ): Promise<EventEnvelope<'run.observed', RunObservedPayload>> {
+    const record = this.getRun(run);
+    return this.enqueue(record, async () => {
+      this.assertRunning(record);
+      const context = options.context ?? this.context(record.runId);
+      this.assertContext(record, context);
+      const event = this.buildEvent(
+        record,
+        context,
+        {
+          type: 'run.observed',
+          payload,
+          ...(options.actor === undefined ? {} : { actor: options.actor }),
+          ...(options.security === undefined ? {} : { security: options.security }),
+        },
+        true,
+      ) as EventEnvelope<'run.observed', RunObservedPayload>;
+
+      return this.commitEvent(record, event, () => {
+        record.status = 'observed';
+      }) as Promise<EventEnvelope<'run.observed', RunObservedPayload>>;
+    });
+  }
+
   checkpoint(run: RunHandle | RunId, input: CheckpointInput): Promise<Checkpoint> {
     const record = this.getRun(run);
     return this.enqueue(record, async () => {
@@ -436,6 +489,37 @@ export class Recorder {
     });
   }
 
+  /** Records evidence limits discovered after a run has started, without inventing an event. */
+  addLimitation(run: RunHandle | RunId, limitation: RunLimitationInput): void {
+    const record = this.getRun(run);
+    if (record.status !== 'running') {
+      throw new InvalidLifecycleTransitionError(
+        `Run "${record.runId}" is already ${record.status}; limitations can no longer be added.`,
+      );
+    }
+    if (
+      !record.limitations.some(
+        (existing) => existing.code === limitation.code && existing.message === limitation.message,
+      )
+    ) {
+      record.limitations.push({ ...limitation });
+    }
+  }
+
+  /** Downgrades evidence after a runtime condition proves complete capture is unavailable. */
+  markIncomplete(run: RunHandle | RunId, limitation?: RunLimitationInput): void {
+    const record = this.getRun(run);
+    if (record.status !== 'running') {
+      throw new InvalidLifecycleTransitionError(
+        `Run "${record.runId}" is already ${record.status}; completeness can no longer change.`,
+      );
+    }
+    record.completeness = 'partial';
+    if (limitation !== undefined) {
+      this.addLimitation(run, limitation);
+    }
+  }
+
   getEvents(run: RunHandle | RunId): readonly EventEnvelope<string, unknown>[] {
     return [...this.getRun(run).events];
   }
@@ -447,7 +531,8 @@ export class Recorder {
   getManifest(run: RunHandle | RunId): SnapshotManifest {
     const record = this.getRun(run);
     const lastEvent = record.events[record.events.length - 1];
-    const terminalStatus = record.status === 'running' ? null : record.status;
+    const terminalStatus =
+      record.status === 'running' ? null : record.status === 'observed' ? 'unknown' : record.status;
     const updatedAt = lastEvent?.timestamp ?? record.createdAt.toISOString();
     return {
       schema_version: snapshotSchemaVersion,
@@ -458,12 +543,19 @@ export class Recorder {
       run_state: record.status === 'running' ? 'running' : 'finished',
       terminal_status: terminalStatus,
       runtime: record.runtime,
-      source: 'native',
-      completeness: record.status === 'running' ? 'partial' : 'complete',
-      limitations:
-        record.status === 'running'
-          ? [{ code: 'recording_failed', message: 'Run has not reached a terminal state.' }]
-          : [],
+      source: record.source,
+      completeness: record.status === 'running' ? 'partial' : record.completeness,
+      limitations: [
+        ...record.limitations,
+        ...(record.status === 'running'
+          ? [
+              {
+                code: 'recording_failed' as const,
+                message: 'Run has not reached a terminal state.',
+              },
+            ]
+          : []),
+      ],
       last_sequence: lastEvent?.sequence ?? 0,
       event_count: record.events.length,
       root_event_id: record.startedEvent.event_id,

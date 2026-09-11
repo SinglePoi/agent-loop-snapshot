@@ -3,6 +3,7 @@
   "references": [
     { "path": "packages/schema" },
     { "path": "packages/recorder" },
+    { "path": "packages/instrumentation" },
     { "path": "packages/trace" },
     { "path": "packages/graph" },
     { "path": "packages/replay" },

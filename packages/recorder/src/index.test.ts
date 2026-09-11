@@ -152,6 +152,29 @@ test('records a failed terminal state and rejects later completion', async () =>
   );
 });
 
+test('finishes an SDK observation without inventing a final state hash', async () => {
+  const recorder = createRecorder();
+  const run = await recorder.startRun({
+    runtime: { name: 'test-sdk', version: '1.0.0' },
+    source: 'sdk',
+    completeness: 'partial',
+    limitations: [
+      { code: 'final_state_unavailable', message: 'The SDK does not expose application state.' },
+    ],
+  });
+
+  await recorder.observeRun(run, { outcome: 'completed' });
+
+  const manifest = recorder.getManifest(run);
+  assert.equal(run.status, 'observed');
+  assert.equal(manifest.terminal_status, 'unknown');
+  assert.equal(manifest.source, 'sdk');
+  assert.equal(manifest.completeness, 'partial');
+  assert.deepEqual(manifest.limitations, [
+    { code: 'final_state_unavailable', message: 'The SDK does not expose application state.' },
+  ]);
+});
+
 test('interceptors can transform payloads without mutating event identity', async () => {
   const afterTypes: string[] = [];
   const recorder = new Recorder({
