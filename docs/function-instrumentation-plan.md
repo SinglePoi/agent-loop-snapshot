@@ -1,6 +1,6 @@
 # 低侵入采集、OpenTelemetry 导入与外部平台导出开发计划
 
-更新时间：2026-09-11。状态：CAP-01、CAP-02 已完成，其余任务待实现，交给 coding agent 执行。
+更新时间：2026-09-11。状态：CAP-01、CAP-02、CAP-03 已完成；CAP-04 的集成框架已实现，CAP-05 及其余任务待实现，交给 coding agent 执行。
 
 本文替代原函数包装计划，保留文件路径。所有新增 API、命令和能力均为待实现目标，不能按已实现功能宣传。
 
@@ -8,11 +8,11 @@
 
 用户无需逐次调用 appendEvent，便可获得可查看的 Agent 运行快照。交付三条入口：
 
-| 入口 | 用户操作 | 本次交付 |
-| --- | --- | --- |
-| 通用函数包装 | 一次注册模型与工具异步函数 | instrument、run、可选 checkpoint |
-| 常用 SDK 自动集成 | 初始化一次，继续调用原 SDK | Node.js OpenAI、Anthropic 专用集成 |
-| 现有 OpenTelemetry traces | 导入标准 OTLP JSON | SDK 导入器、CLI、可查看快照 |
+| 入口                      | 用户操作                   | 本次交付                           |
+| ------------------------- | -------------------------- | ---------------------------------- |
+| 通用函数包装              | 一次注册模型与工具异步函数 | instrument、run、可选 checkpoint   |
+| 常用 SDK 自动集成         | 初始化一次，继续调用原 SDK | Node.js OpenAI、Anthropic 专用集成 |
+| 现有 OpenTelemetry traces | 导入标准 OTLP JSON         | SDK 导入器、CLI、可查看快照        |
 
 新增必交付出口：通过 OTLP/HTTP 将流程遥测发送到用户配置的外部平台或 Collector，同时保留本地快照。包括已有快照批量导出，以及采集运行结束后的异步发送。
 
@@ -60,13 +60,15 @@ const agent = instrument({
   },
 });
 
-const answer = await agent.run({ input: { goal: '查资料并总结' } },
+const answer = await agent.run(
+  { input: { goal: '查资料并总结' } },
   async ({ model, tools, checkpoint }) => {
     const query = await model.call('生成检索词');
     const documents = await tools.search(query);
     await checkpoint({ query, documents }); // 可选
     return model.call(JSON.stringify(documents));
-  });
+  },
+);
 ```
 
 要求：
@@ -128,10 +130,10 @@ SDK 方法可能返回带 `.withResponse()`、`.asResponse()` 等辅助能力的
 
 回调结束后等待已启动调用及其内部调用，处理 Promise.all 提前失败、未 await 和逃逸函数。drain 有可配置超时，超时标记采集不完整，防止后续写入已关闭 Writer；不宣称能取消任意业务函数。关闭后通用包装拒绝新调用；自动拦截的遗留上下文调用按故障策略诊断，不写入旧 Run。首版拒绝嵌套 run，支持外部并发 run。
 
-| 记录故障策略 | 默认入口 | 契约 |
-| --- | --- | --- |
-| strict | 通用包装 | 请求记录失败不执行原函数；执行后记录失败抛记录错误，不重试业务 |
-| best-effort | SDK 自动集成 | 保留原调用结果/异常，诊断记录失败；快照标记不完整且禁止执行 |
+| 记录故障策略 | 默认入口     | 契约                                                           |
+| ------------ | ------------ | -------------------------------------------------------------- |
+| strict       | 通用包装     | 请求记录失败不执行原函数；执行后记录失败抛记录错误，不重试业务 |
+| best-effort  | SDK 自动集成 | 保留原调用结果/异常，诊断记录失败；快照标记不完整且禁止执行    |
 
 业务与记录同时失败时保留原始业务抛出值，次级错误通过安全诊断暴露。strict 模式只有记录失败也必须让 run 失败。best-effort 无法写 manifest 时从运行外诊断明确报告，不能静默成功。通知回调异常不得遮蔽业务错误。记录器自身活动不得递归采集。
 
@@ -149,16 +151,16 @@ alsnap graph ./imported-runs/<run-id> --kind timeline --format json
 
 ### 6.1 映射
 
-| 源数据 | 目标规则 |
-| --- | --- |
-| traceId/spanId | 保留来源，生成符合项目 ID 语法的稳定映射 |
-| parentSpanId | 有效同 trace 父子关系；缺父明确报告，不捏造实际父 span |
-| links | 独立关联，不直接转换为执行依赖或 parent_ids |
-| 时间 | 源纳秒值保留字符串，用 BigInt 做差；展示时间另行转换 |
-| resource/scope | 安全保留服务、SDK、语义约定版本等来源 |
-| attributes/events | 限长、脱敏后保存；未知语义保持可查看 |
-| status/exception | 区分 OK、ERROR、UNSET，不把 UNSET 当作成功 |
-| GenAI/工具属性 | 依据固定映射 profile 分类；缺失参数/输出保持缺失 |
+| 源数据            | 目标规则                                               |
+| ----------------- | ------------------------------------------------------ |
+| traceId/spanId    | 保留来源，生成符合项目 ID 语法的稳定映射               |
+| parentSpanId      | 有效同 trace 父子关系；缺父明确报告，不捏造实际父 span |
+| links             | 独立关联，不直接转换为执行依赖或 parent_ids            |
+| 时间              | 源纳秒值保留字符串，用 BigInt 做差；展示时间另行转换   |
+| resource/scope    | 安全保留服务、SDK、语义约定版本等来源                  |
+| attributes/events | 限长、脱敏后保存；未知语义保持可查看                   |
+| status/exception  | 区分 OK、ERROR、UNSET，不把 UNSET 当作成功             |
+| GenAI/工具属性    | 依据固定映射 profile 分类；缺失参数/输出保持缺失       |
 
 基础表示采用通用 otel.span 观察事件，更新图投影使其可查看。具体模型/工具分类由经过测试的 profile 增强；不能仅凭 span 名称证明工具执行，不能填假结果转为 model.completed/tool.completed。
 
@@ -181,11 +183,11 @@ alsnap graph ./imported-runs/<run-id> --kind timeline --format json
 
 valid 与 complete 分离：协议有效的 partial 观察快照可 validate 成功并附警告；inspect/graph 展示来源、未知状态和采集限制，结构非法才校验失败。
 
-| 来源 | 查看 | 执行能力 |
-| --- | --- | --- |
-| 通用包装完整记录 | 支持 | 由实际记录和现有 Replay 验证器判断，不承诺恢复代码 |
-| SDK 记录 | 支持 | 缺损/截断/降级则禁止回放；完整也要校验适配器和权限 |
-| OTel 导入 | 支持 | 首版统一 observation-only，禁止 replay/resume/生成可执行 Workflow |
+| 来源             | 查看 | 执行能力                                                          |
+| ---------------- | ---- | ----------------------------------------------------------------- |
+| 通用包装完整记录 | 支持 | 由实际记录和现有 Replay 验证器判断，不承诺恢复代码                |
+| SDK 记录         | 支持 | 缺损/截断/降级则禁止回放；完整也要校验适配器和权限                |
+| OTel 导入        | 支持 | 首版统一 observation-only，禁止 replay/resume/生成可执行 Workflow |
 
 门禁必须覆盖 SDK 和 CLI，不能只隐藏 UI。能力字段不是授权，伪造 replay=true 不能绕过完整性和 Policy。导入器强制覆盖源自报执行能力；未知副作用在观察元数据记 unknown，执行检查拒绝，不能默认 read_only。
 
@@ -253,22 +255,22 @@ flush/shutdown 有 deadline，超时保留队列并报告未发送数量；重�
 
 ## 9. 任务拆分
 
-| 编号 | 工作 | 依赖 | 验收 |
-| --- | --- | --- | --- |
-| CAP-01 | 协议审查、ADR、公共类型与能力矩阵 | 无 | 明确 hash、观察终态、版本、未知副作用 |
-| CAP-02 | 协议扩展、兼容读取、查看和执行门禁 | CAP-01 | 旧夹具通过；观察快照可看不可执行 |
-| CAP-03 | 通用包装、上下文、serializer、checkpoint | CAP-02 | 离线 Loop 无需 appendEvent |
-| CAP-04 | 自动集成加载框架、抑制去重、故障策略 | CAP-03 | ESM/CJS、幂等卸载及共存测试通过 |
-| CAP-05 | OpenAI/Anthropic 非流式及 stream:true | CAP-04 | 真实 SDK + 本地服务测试通过 |
-| CAP-06 | OTLP 解析、profiles、来源与时间映射 | CAP-02 | 正常/未知/缺损 trace 有确定输出 |
-| CAP-07 | import-otel CLI 和离线查看闭环 | CAP-06 | 多 trace 可导入、可看，执行被拒绝 |
-| CAP-08 | 三类示例、文档、打包验证 | CAP-05、CAP-07 | tarball 消费者与质量门禁通过 |
-| EXP-01 | exporter 接口、内容策略、DAG/span 映射 ADR | CAP-01 | 固化版本、损失报告、凭据和发送状态契约 |
-| EXP-02 | 纯映射器和出站过滤、dry-run | CAP-02、EXP-01 | 原生/SDK/导入快照生成合法 OTLP，默认无正文泄露 |
-| EXP-03 | OTLP HTTP 客户端、响应分类与有界重试 | EXP-02 | 本地服务验证鉴权、超时、partial_success 和重试规则 |
-| EXP-04 | 有界持久化队列、恢复、锁与 flush/shutdown | EXP-03 | 中断可恢复，目标不串写，故障不影响业务 |
-| EXP-05 | SDK 运行结束自动发送、CLI export/resume | CAP-03、CAP-04、EXP-04 | 两种实时入口及已有快照均可发送，业务不被重跑 |
-| EXP-06 | Collector 端到端、平台指南、打包与回归 | CAP-08、EXP-05 | 本地完整验证、兼容矩阵、示例和 tarball 通过 |
+| 编号   | 工作                                       | 依赖                   | 验收                                               |
+| ------ | ------------------------------------------ | ---------------------- | -------------------------------------------------- |
+| CAP-01 | 协议审查、ADR、公共类型与能力矩阵          | 无                     | 明确 hash、观察终态、版本、未知副作用              |
+| CAP-02 | 协议扩展、兼容读取、查看和执行门禁         | CAP-01                 | 旧夹具通过；观察快照可看不可执行                   |
+| CAP-03 | 通用包装、上下文、serializer、checkpoint   | CAP-02                 | 离线 Loop 无需 appendEvent                         |
+| CAP-04 | 自动集成加载框架、抑制去重、故障策略       | CAP-03                 | ESM/CJS、幂等卸载及共存测试通过                    |
+| CAP-05 | OpenAI/Anthropic 非流式及 stream:true      | CAP-04                 | 真实 SDK + 本地服务测试通过                        |
+| CAP-06 | OTLP 解析、profiles、来源与时间映射        | CAP-02                 | 正常/未知/缺损 trace 有确定输出                    |
+| CAP-07 | import-otel CLI 和离线查看闭环             | CAP-06                 | 多 trace 可导入、可看，执行被拒绝                  |
+| CAP-08 | 三类示例、文档、打包验证                   | CAP-05、CAP-07         | tarball 消费者与质量门禁通过                       |
+| EXP-01 | exporter 接口、内容策略、DAG/span 映射 ADR | CAP-01                 | 固化版本、损失报告、凭据和发送状态契约             |
+| EXP-02 | 纯映射器和出站过滤、dry-run                | CAP-02、EXP-01         | 原生/SDK/导入快照生成合法 OTLP，默认无正文泄露     |
+| EXP-03 | OTLP HTTP 客户端、响应分类与有界重试       | EXP-02                 | 本地服务验证鉴权、超时、partial_success 和重试规则 |
+| EXP-04 | 有界持久化队列、恢复、锁与 flush/shutdown  | EXP-03                 | 中断可恢复，目标不串写，故障不影响业务             |
+| EXP-05 | SDK 运行结束自动发送、CLI export/resume    | CAP-03、CAP-04、EXP-04 | 两种实时入口及已有快照均可发送，业务不被重跑       |
+| EXP-06 | Collector 端到端、平台指南、打包与回归     | CAP-08、EXP-05         | 本地完整验证、兼容矩阵、示例和 tarball 通过        |
 
 **CAP-01 完成记录（2026-09-11）**
 
@@ -281,6 +283,22 @@ flush/shutdown 有 deadline，超时保留队列并报告未发送数量；重�
 - Snapshot 协议已升级到 `0.2.0`；新 manifest 持久化 `source`、`completeness` 与限制原因，`run.observed` / `otel.span` 用于不含可恢复状态的观察记录；
 - `0.1.0` 夹具继续可读和校验，迁移以新目录输出 `0.2.0` 并补充原生来源元数据；`partial` / `unknown` 快照结构有效时保留为 warning；
 - inspect 与图的文本/JSON 输出展示来源、完整度、限制和执行资格；CLI replay、Mock Replay、Verified Replay、Trace Compiler 均拒绝 observation-only 记录。
+
+**CAP-04 框架实现记录（2026-09-11）**
+
+- 已新增 `@agent-loop-snapshot/instrumentation`：`initInstrumentation()` 建立每个 run 独立的 AsyncLocalStorage 上下文、唯一快照目录和 SDK 来源的观察快照；无可重建状态时以 `run.observed` 终结，禁止伪造 `final_state_hash`；
+- 集成按对象身份引用计数安装和卸载，运行范围外调用仅报告一次；`withSuppression()` 为通用包装与 SDK 包装的同一调用提供上下文去重；best-effort 和 strict 的记录失败契约已在框架层实现；
+- `patchMethod()` 只包装可写的自有方法，保留 `this`，且只在包装仍为当前值时恢复，因此不会覆盖第三方后来安装的包装；已覆盖 ESM/CJS “先初始化、后加载业务模块”上下文测试；
+- 本阶段不对 Node 模块源代码做全局重写，也不替换应用 OTel provider/context manager。OpenAI/Anthropic 的模块名、版本检查和具体方法包装属于 CAP-05。
+- 已与 CAP-03 合并为单一 AsyncLocalStorage 运行上下文：通用 model 包装调用底层 SDK 时设置 suppression，避免自动集成重复采集；通用 tool 内部的独立 SDK 调用不被抑制，仍作为合法嵌套调用记录。通用 `instrument().run()` 在已有 `telemetry.run()` 中会加入现有 Recorder 而不创建嵌套快照；加入式通用事件在写入 SDK Recorder 前应用自身脱敏管线。SDK integration 只会捕获其所属 controller 的 run；integration 与加入式通用调用可登记未 await 的 Promise，由外层 run 在终结前有界 drain。共享 integration 的诊断按仍存活 controller 分发。上述边界均有回归测试。
+
+**CAP-03 完成记录（2026-09-11）**
+
+- `@agent-loop-snapshot/instrumentation` 已提供类型保留的 `instrument()` 通用入口：model 与具名 tool 的 Promise 调用自动写入 requested/completed/failed 配对事件，工具必须声明副作用等级；业务结果和原始业务错误保持不变；
+- 每次 `run()` 使用独立的异步上下文、Recorder、Writer 和随机唯一目录；已覆盖并行工具调用、未 await 调用的有界 drain、关闭后拒绝新调用及 snapshot 回调。调用未在超时内结束时写入 `drain_timed_out` 限制；
+- 默认安全 serializer 仅遍历自有数据属性，不调用 getter 或 `toJSON`；循环、BigInt、类实例和超限副本要求显式 serializer。输入、输出、checkpoint 均在独立记录副本上处理，并在写盘前经过默认 RedactionPipeline；
+- checkpoint 只记录用户显式提供的全量 JSON state。仅当最后一个记录动作是 checkpoint 时才生成带真实 state hash 的 `run.completed`；否则用 observation terminal 和 `final_state_unavailable` 限制，绝不把业务返回值伪装为状态。
+- CAP-03 与 CAP-04 共用同一运行上下文；`instrument().run()` 在 `telemetry.run()` 中会加入当前 run，嵌套通用 run 或在任意活动 run 中启动新的 `telemetry.run()` 则明确拒绝，外部并发 run 仍保持隔离。drain 超时或业务失败会把快照完整度降为 `partial` 并写入执行阻断限制。
 
 CAP-06 可在 CAP-02 后独立实施；可由单个 coding agent 顺序完成，不要求委派或创建外部任务。
 

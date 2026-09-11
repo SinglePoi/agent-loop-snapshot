@@ -63,6 +63,15 @@ importers:
         specifier: workspace:*
         version: link:../trace
 
+  packages/instrumentation:
+    dependencies:
+      '@agent-loop-snapshot/recorder':
+        specifier: workspace:*
+        version: link:../recorder
+      '@agent-loop-snapshot/schema':
+        specifier: workspace:*
+        version: link:../schema
+
   packages/recorder:
     dependencies:
       '@agent-loop-snapshot/schema':
