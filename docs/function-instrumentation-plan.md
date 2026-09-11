@@ -1,6 +1,6 @@
-# 低侵入采集与 OpenTelemetry 导入开发计划
+# 低侵入采集、OpenTelemetry 导入与外部平台导出开发计划
 
-更新时间：2026-09-09。状态：待实现，交给 coding agent 执行。
+更新时间：2026-09-11。状态：待实现，交给 coding agent 执行。
 
 本文替代原函数包装计划，保留文件路径。所有新增 API、命令和能力均为待实现目标，不能按已实现功能宣传。
 
@@ -14,9 +14,11 @@
 | 常用 SDK 自动集成 | 初始化一次，继续调用原 SDK | Node.js OpenAI、Anthropic 专用集成 |
 | 现有 OpenTelemetry traces | 导入标准 OTLP JSON | SDK 导入器、CLI、可查看快照 |
 
+新增必交付出口：通过 OTLP/HTTP 将流程遥测发送到用户配置的外部平台或 Collector，同时保留本地快照。包括已有快照批量导出，以及采集运行结束后的异步发送。
+
 自动集成在用户进程内工作，不要求请求经过本项目服务器；仍需初始化入口，不能穿透远程黑盒 Agent。自定义工具通过通用包装记录，不能把模型生成的 tool-call 声明当成工具实际执行。
 
-三条入口均为本计划的必交付项。OTel“接收”首版落实为离线文件/内存导入；实时 exporter 桥接、常驻 HTTP/gRPC 接收器、Collector 部署为后续方向。本次不实现 Python、框架插件、网络抓包、任意对象 Proxy、自动重试、自动变量采集、自动恢复调用栈、Web Viewer 或 npm 发布。
+三条入口及外部导出均为本计划的必交付项。OTel“接收”首版落实为离线文件/内存导入；实时逐 span 发送、常驻 HTTP/gRPC 接收器、生产 Collector 部署为后续方向。本次不实现 Python、框架插件、网络抓包、任意对象 Proxy、业务调用自动重试、自动变量采集、自动恢复调用栈、Web Viewer 或 npm 发布。导出传输自身的有界重试属于本次范围。
 
 ## 2. 架构和包划分
 
@@ -27,11 +29,13 @@ OTLP JSON ── span 解析 / 来源映射 / 脱敏 ── 导入快照构建�
 
 版本化快照 ── validate / inspect / graph
            └─ 完整性与能力检查 ── replay / compile / resume
+           └─ 导出映射 / 出站脱敏 ── 持久化发送队列 ── OTLP HTTP ── 平台或 Collector
 ```
 
 - `packages/instrumentation`：通用包装、运行生命周期、异步上下文、序列化、诊断和扩展接口。
 - `packages/instrumentation-openai`、`packages/instrumentation-anthropic`：可选供应商集成，隔离依赖。
 - `packages/otel-import`：OTLP 解析、映射 profile、历史快照构建和导入报告。
+- `packages/otel-export`：快照到 span 映射、出站过滤、OTLP HTTP 传输、持久化发送队列及报告。作为可选包，通过 exporter 接口接入采集层，不向 Recorder 增加网络依赖。
 - 对 schema、trace、graph、replay、CLI 做必要兼容修改，保留原 Recorder 接入方式。
 
 禁止 recorder 反向依赖 instrumentation/replay。历史 trace 使用专门构建路径保留源时间和标识，不能当作当前时间的实时 Recorder 调用写入。
@@ -187,7 +191,67 @@ valid 与 complete 分离：协议有效的 partial 观察快照可 validate 成
 
 checkpoint-only 记录与事件回退恢复能力单独测试。业务结果不能自动当作可重建状态，也不应给无状态采集填造最终状态 hash。OTel 导入验收仅要求可信查看。
 
-## 8. 任务拆分
+## 8. 外部平台导出
+
+### 8.1 范围和用户接口
+
+优先交付 OTLP/HTTP JSON 发送到用户提供的完整 traces endpoint；支持经 Collector 转发至平台。首版不实现厂商专有 API、通用 webhook、gRPC 或完整快照压缩包上传。OTLP 传递可观察流程，checkpoint/二进制 artifact 本体仍留在本地。
+
+拟议 CLI：
+
+```sh
+# 默认只发送元数据；endpoint 和鉴权从本机环境配置读取
+alsnap export-otel ./runs/<run-id> --config ./export.json --dry-run --json
+alsnap export-otel ./runs/<run-id> --config ./export.json --json
+# 重启后续传，只处理显式指定的本地发送队列
+alsnap export-otel --resume --config ./export.json --json
+```
+
+配置至少包含目标别名、完整 endpoint 或 endpointEnv、headersEnv、service.name、内容策略、超时、批次上限、重试预算和 queueDir。不把凭据直接放入命令行、版本库或快照。缺配置时不发送，不预设云端收集地址；不从快照内容读取发送目的地。
+
+提供 `createOtlpExporter(config)`，通用 instrument 与 initInstrumentation 均接受 exporters。采集层在本地快照终结后异步入队，失败 run 的已提交快照也能发送；实时逐事件发送不在首版范围。flush/shutdown 返回有界等待的发送报告，不修改业务返回值，不替换或关闭应用已有 OTel provider。
+
+提供 SDK 的显式 exportSnapshot，以及 CLI 的 dry-run。dry-run 展示经过过滤的目标、span 数、丢弃字段和映射损失，不联网、不落发送队列、不输出认证信息。已有导入快照可由用户显式导出，但导入不会自动触发发送，避免转发循环。
+
+### 8.2 快照到 span 的映射
+
+- 一个原生 Run 映射一个 trace；requested 与对应 completed/failed 配对成调用 span。未配对调用标记不完整，不伪造成功或最终输出。
+- 使用稳定的合法非零 OTel trace/span ID，重试和相同映射版本的重复导出保持一致；保存映射版本。区分不同 Run，不能按参数去重。
+- OTel span 只有一个 parent。对快照多父 DAG 定义稳定、明确的主父选择，其余关系保留为 links 和来源属性；不串行化并行兄弟。导出报告明确这一映射差异。
+- 状态变化、checkpoint 和决策可按语义作为 span events/摘要；artifact 默认仅安全元数据，不发送内容、预览或本地绝对路径。
+- 保留真实时间、错误、可得 usage、来源、采集完整度和限制。业务失败与导出失败分开，UNSET/未知状态不变成 OK。
+- 对 OTel 导入快照优先保留合法源 ID、resource、scope 和 links，但保持 observation-only；再次导出/导入不提升执行能力。未知或有损字段在报告说明，不能声称无损往返。
+- CAP-01 的协议设计需覆盖导出所需来源信息。共享规范化类型可以抽公共模块，不能制造 import/export 包之间的循环依赖。
+
+### 8.3 出站内容策略
+
+默认 metadata-only：只发送允许列表内的流程名称、类型、状态、时间、关系和安全资源信息。模型输入/输出、工具参数/结果、状态值、异常消息、任意 attributes/事件文本默认不发送；名称等自由文本也需脱敏。
+
+用户显式选择 redacted-content 后，才发送经过出站 RedactionPipeline 和字段限额处理的内容。本地快照可能来自旧版本或外部导入，不能假设已经脱敏；过滤先于队列落盘。凭据只在发送时解析，不写入 spool、报告或日志。
+
+使用 HTTPS，显式本地测试 endpoint 可使用 HTTP。重定向不自动携带凭据转发；首版禁用自动重定向并报告错误。最终配置只接受用户给定的目的地，不解引用 trace 中的 URL。
+
+### 8.4 队列、传输和故障
+
+记录与发送独立：远端不可达不让 Agent run 失败，不把本地完整快照标记成采集不完整；单独报告 export 状态。导出器不能以可能抛错的网络操作直接挂到 Recorder 提交拦截器上。
+
+发送队列有字节/条数/保留期限上限，保存脱敏 payload、目标别名及非敏感配置指纹、批次 ID、尝试次数。使用原子文件更新和单消费者锁，测试进程中断与恢复。目标 endpoint 或内容策略变化时不可悄悄把旧队列发往新目标，需显式重新导出。
+
+队列满或磁盘失败报告未入队状态，原快照保留，用户可以后续重新导出。内存工作队列也必须有界。处理发送超时、取消、429、可重试错误和不可重试鉴权/格式错误；采用指数退避、抖动、最大次数和总时限，按实施时锁定的 OTLP 规范处理 Retry-After。
+
+正确解析 OTLP partial_success，不把 HTTP 2xx 一律视为完整接收；按规范不自动重发 partial-success 批次，保留拒绝数量与人工处理报告。其余失败区分 pending/retryable、rejected、exhausted、accepted 和 unknown-delivery，避免把请求已发但响应丢失当作未执行。
+
+传输不承诺 exactly-once：响应丢失可能产生重复 span，稳定 ID 不保证每个平台都会去重。CLI 显式发送仅在全部批次被完整接受时返回成功，入队待发送/部分拒绝/预算耗尽返回非零及机器可读报告；HTTP 接受也不等于平台 UI 已索引。
+
+flush/shutdown 有 deadline，超时保留队列并报告未发送数量；重试只涉及遥测请求，绝不重跑模型或工具。禁止 exporter 自身 HTTP 被 SDK/OTel 集成递归采集。
+
+### 8.5 平台兼容验收
+
+首版必须用固定版本的本地 OpenTelemetry Collector + debug/file exporter 跑真实端到端测试，证明发送的是有效 OTLP。提供可复制的 Collector 配置示例及自建后端接入说明，不部署生产服务。
+
+为 Langtrace 和 Grafana 的 OTLP 接入编写配置指南；coding agent 实施时核对各自官方 endpoint、协议和鉴权要求。若后端不直接支持 JSON，则示例经 Collector 转换协议。兼容矩阵分别标注“本地验证”“依据官方文档”“云端实测”，不能把 Collector 验证当成所有厂商 UI 的实测。没有用户凭据不阻塞本地交付，不主动发送生产数据。
+
+## 9. 任务拆分
 
 | 编号 | 工作 | 依赖 | 验收 |
 | --- | --- | --- | --- |
@@ -199,10 +263,16 @@ checkpoint-only 记录与事件回退恢复能力单独测试。业务结果不�
 | CAP-06 | OTLP 解析、profiles、来源与时间映射 | CAP-02 | 正常/未知/缺损 trace 有确定输出 |
 | CAP-07 | import-otel CLI 和离线查看闭环 | CAP-06 | 多 trace 可导入、可看，执行被拒绝 |
 | CAP-08 | 三类示例、文档、打包验证 | CAP-05、CAP-07 | tarball 消费者与质量门禁通过 |
+| EXP-01 | exporter 接口、内容策略、DAG/span 映射 ADR | CAP-01 | 固化版本、损失报告、凭据和发送状态契约 |
+| EXP-02 | 纯映射器和出站过滤、dry-run | CAP-02、EXP-01 | 原生/SDK/导入快照生成合法 OTLP，默认无正文泄露 |
+| EXP-03 | OTLP HTTP 客户端、响应分类与有界重试 | EXP-02 | 本地服务验证鉴权、超时、partial_success 和重试规则 |
+| EXP-04 | 有界持久化队列、恢复、锁与 flush/shutdown | EXP-03 | 中断可恢复，目标不串写，故障不影响业务 |
+| EXP-05 | SDK 运行结束自动发送、CLI export/resume | CAP-03、CAP-04、EXP-04 | 两种实时入口及已有快照均可发送，业务不被重跑 |
+| EXP-06 | Collector 端到端、平台指南、打包与回归 | CAP-08、EXP-05 | 本地完整验证、兼容矩阵、示例和 tarball 通过 |
 
 CAP-06 可在 CAP-02 后独立实施；可由单个 coding agent 顺序完成，不要求委派或创建外部任务。
 
-## 9. 必要测试与交付标准
+## 10. 必要测试与交付标准
 
 1. 包装：配对、类型/身份/this、原错误、序列化和脱敏、原函数只执行一次。
 2. 并发：多 run 隔离、乱序、嵌套、未 await、提前失败、drain 超时、逃逸调用和资源关闭。
@@ -213,14 +283,19 @@ CAP-06 可在 CAP-02 后独立实施；可由单个 coding agent 顺序完成，
 7. OTel：多 resource/scope/trace、输入乱序、64 位时间、缺父、links、环、重复冲突、未知语义、UNSET、采样、缺 payload、限额和恶意属性。
 8. 兼容：旧快照、新观察快照的 validate/inspect/graph；全部 SDK/CLI 执行入口拒绝 observation-only，伪造能力不能绕过。
 9. 三套离线示例及 tarball 安装验证，无真实 API key、付费请求和生产 trace；供应商测试使用本地服务。
+10. 导出映射：事件配对、DAG 多父转 links、并行、稳定 ID、未知/失败状态、导入往返不提升执行能力。
+11. 出站安全：默认无正文、内容模式再次脱敏、spool/日志无凭据或原始敏感 payload，dry-run 不联网。
+12. 传输：本地 HTTP 服务覆盖完整接受、partial_success、429/Retry-After、鉴权拒绝、超时/响应丢失、取消和重定向；验证不重复执行业务。
+13. 队列：容量/磁盘故障、崩溃恢复、多进程锁、配置变化、过期批次、deadline、未知送达状态及递归采集抑制。
+14. 固定版本 Collector 真实接收，SDK 自动发送和 CLI 重发端到端测试；与已有 OTel provider/exporter 共存，关闭时互不影响。
 
 检查根 tsconfig references、测试脚本、workspace、锁文件及 release smoke 显式包清单，纳入全部新包。保持 private、ESM、files 白名单。执行 pnpm run check 与 pnpm run release:verify，核对最终退出码，不把中途输出当完成；网络/权限阻断与代码失败分别报告并按环境规则处理。
 
-更新 README：入口选择、可复制命令、模型/工具可见范围、支持版本、ESM/CJS/打包限制、流、故障模式和观察快照限制。交付 ADR、代码、测试、脱敏 fixtures、离线示例及本计划完成状态；未完成的 SDK/导入不能以“接口预留”算交付。
+更新 README：入口选择、可复制命令、模型/工具可见范围、支持版本、ESM/CJS/打包限制、流、故障模式、观察快照限制、外部平台配置及内容策略。交付 ADR、代码、测试、脱敏 fixtures、离线示例、Collector 示例、平台兼容矩阵及本计划完成状态；未完成的 SDK/导入/导出不能以“接口预留”算交付。
 
 开始前读取适用 AGENTS.md、检查工作区，保留用户修改。历史对话示例可能遗漏事件配对/状态记录，必须以实际协议和测试为准。coding agent 获授权实现本计划及必要兼容修改，不要求发布、修改 private、推送或升级无关依赖。
 
-## 10. 参考资料
+## 11. 参考资料
 
 - [Langtrace SDK 拦截源码](https://github.com/Scale3-Labs/langtrace-typescript-sdk/blob/main/src/instrumentation/openai/instrumentation.ts)：参考方法包装机制，不照搬版本范围。
 - [Langtrace Quickstart](https://docs.langtrace.ai/quickstart)：参考初始化体验。
