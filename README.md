@@ -140,6 +140,45 @@ TypeScript 技术决策记录在 [ADR-0001](docs/adr/0001-use-typescript.md)。�
 
 ## CLI
 
+## SDK 自动采集（CAP-05）
+
+`@agent-loop-snapshot/instrumentation-openai` 与
+`@agent-loop-snapshot/instrumentation-anthropic` 是可选的 Node.js ESM 包。当前
+固定支持 Node.js 24、OpenAI `7.15.0` 和 Anthropic `0.125.0`：分别覆盖 OpenAI
+Chat Completions、Responses，以及 Anthropic Messages 的 `create()` 非流式与
+`stream: true` 调用。未在此范围内的 SDK 版本、各 SDK 的 `.stream()` helper、
+Azure/Bedrock/Vertex 专用客户端均不在当前支持矩阵内。
+
+初始化必须早于业务模块加载。包装直接保留 SDK 返回的 Promise-like 对象及其
+`.withResponse()` / `.asResponse()` 等辅助能力；流仅在业务代码迭代时观测，不会
+提前读取、缓冲或发起第二次请求。默认记录内容副本并在落盘前脱敏；传入
+`recording: 'metadata-only'` 时不记录模型 prompt 或完整响应正文。
+
+```ts
+import { initInstrumentation } from '@agent-loop-snapshot/instrumentation';
+import { openAIIntegration } from '@agent-loop-snapshot/instrumentation-openai';
+import { anthropicIntegration } from '@agent-loop-snapshot/instrumentation-anthropic';
+
+const telemetry = initInstrumentation({
+  snapshotDir: './runs',
+  integrations: [
+    openAIIntegration({ recording: 'metadata-only' }),
+    anthropicIntegration({ recording: 'metadata-only' }),
+  ],
+});
+const { main } = await import('./app.js');
+try {
+  await telemetry.run({ input: { goal: '完成任务' } }, () => main());
+} finally {
+  await telemetry.shutdown();
+}
+```
+
+自动采集只记录 `telemetry.run()` 的异步上下文中的调用；范围外调用保持原行为，
+并产生一次诊断。流未被消费或在 drain deadline 后仍未结束时，快照标记为 partial
+且不可执行；提前结束会额外标记 `stream_ended_early`。SDK 内部重试不会被伪造为
+独立 attempt。
+
 基础检查和图导出命令已经可用：
 
 ```bash

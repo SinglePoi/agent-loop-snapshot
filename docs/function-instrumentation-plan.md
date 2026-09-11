@@ -1,6 +1,6 @@
 # 低侵入采集、OpenTelemetry 导入与外部平台导出开发计划
 
-更新时间：2026-09-11。状态：CAP-01、CAP-02、CAP-03 已完成；CAP-04 的集成框架已实现，CAP-05 及其余任务待实现，交给 coding agent 执行。
+更新时间：2026-09-11。状态：CAP-01 至 CAP-05 已完成；CAP-06 及其余任务待实现，交给 coding agent 执行。
 
 本文替代原函数包装计划，保留文件路径。所有新增 API、命令和能力均为待实现目标，不能按已实现功能宣传。
 
@@ -299,6 +299,13 @@ flush/shutdown 有 deadline，超时保留队列并报告未发送数量；重�
 - 默认安全 serializer 仅遍历自有数据属性，不调用 getter 或 `toJSON`；循环、BigInt、类实例和超限副本要求显式 serializer。输入、输出、checkpoint 均在独立记录副本上处理，并在写盘前经过默认 RedactionPipeline；
 - checkpoint 只记录用户显式提供的全量 JSON state。仅当最后一个记录动作是 checkpoint 时才生成带真实 state hash 的 `run.completed`；否则用 observation terminal 和 `final_state_unavailable` 限制，绝不把业务返回值伪装为状态。
 - CAP-03 与 CAP-04 共用同一运行上下文；`instrument().run()` 在 `telemetry.run()` 中会加入当前 run，嵌套通用 run 或在任意活动 run 中启动新的 `telemetry.run()` 则明确拒绝，外部并发 run 仍保持隔离。drain 超时或业务失败会把快照完整度降为 `partial` 并写入执行阻断限制。
+
+**CAP-05 完成记录（2026-09-11）**
+
+- 已新增 `@agent-loop-snapshot/instrumentation-openai` 与 `@agent-loop-snapshot/instrumentation-anthropic` 两个可选包，固定支持 OpenAI `7.15.0` 与 Anthropic `0.125.0`；支持范围和 ESM 初始化示例已写入 README；
+- OpenAI Chat Completions、Responses，以及 Anthropic Messages 的 `create()` 非流式调用都在真实 SDK 配合本地 HTTP fixture 下验证。包装直接返回原 SDK Promise-like 对象，覆盖了 OpenAI `.withResponse()` 可用性，且保持 `this`、业务错误、取消和 SDK 内部重试的原始行为；
+- OpenAI Chat Completions 和 Anthropic Messages 的 `stream: true` 均使用惰性 async-iterator 包装：只在业务消费者推进迭代时观察，不预读或重复请求；完整消费、流错误和提前 `break` 都会产生相应的完成/失败/限制记录。未消费流由既有有界 drain 标记为 partial；
+- 默认采集内容副本并使用 Recorder 的默认脱敏管线，`metadata-only` 模式不会持久化 prompt 或完整响应正文。通用包装进入同一 run 时继续使用 suppression 避免重复记录。
 
 CAP-06 可在 CAP-02 后独立实施；可由单个 coding agent 顺序完成，不要求委派或创建外部任务。
 
