@@ -458,6 +458,12 @@ export class Recorder {
       run_state: record.status === 'running' ? 'running' : 'finished',
       terminal_status: terminalStatus,
       runtime: record.runtime,
+      source: 'native',
+      completeness: record.status === 'running' ? 'partial' : 'complete',
+      limitations:
+        record.status === 'running'
+          ? [{ code: 'recording_failed', message: 'Run has not reached a terminal state.' }]
+          : [],
       last_sequence: lastEvent?.sequence ?? 0,
       event_count: record.events.length,
       root_event_id: record.startedEvent.event_id,

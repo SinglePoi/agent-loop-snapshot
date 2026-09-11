@@ -6,32 +6,136 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 import {
+  assessSnapshotExecution,
   inspectSnapshotCompatibility,
   migrateSnapshot,
   migrateSnapshotDirectory,
+  readSnapshotObservationMetadata,
   schemaFiles,
   snapshotSchemaVersion,
+  workflowSchemaVersion,
   viewSnapshotMetadata,
   type WorkflowDocument,
 } from './index.js';
-import { validateSnapshotDirectory, validateWorkflow } from './validator.js';
+import { validateSnapshot, validateSnapshotDirectory, validateWorkflow } from './validator.js';
 
-test('exports the initial snapshot schema version', () => {
-  assert.equal(snapshotSchemaVersion, '0.1.0');
+test('exports the current snapshot schema version', () => {
+  assert.equal(snapshotSchemaVersion, '0.2.0');
 });
 
-test('ships all v0.1.0 JSON Schemas with a versioned root', async () => {
+test('keeps execution eligibility separate from source claims and permissions', () => {
+  assert.deepEqual(
+    assessSnapshotExecution({
+      source: 'otel-import',
+      completeness: 'complete',
+      limitations: [],
+    }),
+    {
+      eligibility: 'observation_only',
+      reason: 'OTel-imported snapshots are observation-only.',
+    },
+  );
+  assert.equal(
+    assessSnapshotExecution({
+      source: 'sdk',
+      completeness: 'partial',
+      limitations: [],
+    }).eligibility,
+    'observation_only',
+  );
+  assert.equal(
+    assessSnapshotExecution({
+      source: 'native',
+      completeness: 'complete',
+      limitations: [{ code: 'final_state_unavailable', message: 'No state was recorded.' }],
+    }).eligibility,
+    'observation_only',
+  );
+  assert.equal(
+    assessSnapshotExecution({
+      source: 'native',
+      completeness: 'complete',
+      limitations: [],
+    }).eligibility,
+    'eligible_for_validation',
+  );
+});
+
+test('accepts a partial observation snapshot for viewing but not execution', () => {
+  const document = {
+    manifest: {
+      schema_version: '0.2.0',
+      snapshot_type: 'run-snapshot',
+      run_id: 'run_00000000-0000-4000-8000-000000000099',
+      created_at: '2026-09-11T00:00:00.000Z',
+      updated_at: '2026-09-11T00:00:01.000Z',
+      run_state: 'finished',
+      terminal_status: 'unknown',
+      runtime: { name: 'otel-import', version: '1.0.0' },
+      source: 'otel-import',
+      completeness: 'partial',
+      limitations: [{ code: 'missing_root', message: 'Source trace has no root span.' }],
+      last_sequence: 2,
+      event_count: 2,
+      completed_at: '2026-09-11T00:00:01.000Z',
+    },
+    events: [
+      {
+        schema_version: '0.2.0',
+        run_id: 'run_00000000-0000-4000-8000-000000000099',
+        event_id: 'evt_00000000-0000-4000-8000-000000000099',
+        parent_ids: [],
+        sequence: 1,
+        type: 'otel.span',
+        timestamp: '2026-09-11T00:00:00.000Z',
+        monotonic_offset_ms: 0,
+        actor: 'otel',
+        payload: { trace_id: 'trace-1', span_id: 'span-1', name: 'root', status: 'unset' },
+        security: { side_effect: 'read_only', redactions: [] },
+      },
+      {
+        schema_version: '0.2.0',
+        run_id: 'run_00000000-0000-4000-8000-000000000099',
+        event_id: 'evt_00000000-0000-4000-8000-000000000100',
+        parent_ids: ['evt_00000000-0000-4000-8000-000000000099'],
+        sequence: 2,
+        type: 'run.observed',
+        timestamp: '2026-09-11T00:00:01.000Z',
+        monotonic_offset_ms: 1,
+        actor: 'otel',
+        payload: { outcome: 'unknown' },
+        security: { side_effect: 'read_only', redactions: [] },
+      },
+    ],
+  };
+  const result = validateSnapshot(document);
+
+  assert.equal(result.valid, true, JSON.stringify(result.diagnostics));
+  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === 'SNAPSHOT_PARTIAL'));
+  assert.equal(
+    assessSnapshotExecution(readSnapshotObservationMetadata(document.manifest)).eligibility,
+    'observation_only',
+  );
+});
+
+test('ships versioned schemas and preserves the independent Workflow version', async () => {
   const schemaDirectory = resolve(dirname(fileURLToPath(import.meta.url)), '../schemas');
 
   for (const fileName of Object.values(schemaFiles)) {
     const rawSchema = await readFile(resolve(schemaDirectory, fileName), 'utf8');
     const schema = JSON.parse(rawSchema) as {
       $schema?: string;
-      properties?: { schema_version?: { const?: string } };
+      properties?: { schema_version?: { const?: string; enum?: string[] } };
     };
 
     assert.equal(schema.$schema, 'https://json-schema.org/draft/2020-12/schema');
-    assert.equal(schema.properties?.schema_version?.const, snapshotSchemaVersion);
+    const version = schema.properties?.schema_version;
+    if (fileName === schemaFiles.workflow) {
+      assert.equal(version?.const, workflowSchemaVersion);
+    } else {
+      assert.ok(version?.enum?.includes(snapshotSchemaVersion));
+      assert.ok(version?.enum?.includes('0.1.0'));
+    }
   }
 });
 
@@ -42,7 +146,7 @@ test('validates reusable golden fixtures and reports expected failures', async (
     { name: 'tool-failure-retry', valid: true },
     { name: 'parallel-calls', valid: true },
     { name: 'corrupted-reference', valid: false, code: 'ARTIFACT_DIGEST_MISMATCH' },
-    { name: 'unknown-version', valid: false, code: 'SCHEMA_CONST' },
+    { name: 'unknown-version', valid: false, code: 'SCHEMA_ENUM' },
   ] as const;
 
   for (const fixture of fixtures) {
@@ -205,15 +309,39 @@ test('migrates the v0.0.0 golden snapshot without changing its source document',
 
   assert.deepEqual(first.diagnostics, []);
   assert.equal(first.report?.sourceVersion, '0.0.0');
-  assert.equal(first.report?.targetVersion, '0.1.0');
-  assert.equal(first.report?.appliedSteps.length, 1);
-  assert.equal((first.document?.manifest as { schema_version?: string }).schema_version, '0.1.0');
+  assert.equal(first.report?.targetVersion, '0.2.0');
+  assert.equal(first.report?.appliedSteps.length, 2);
+  assert.equal((first.document?.manifest as { schema_version?: string }).schema_version, '0.2.0');
   assert.deepEqual(source, original);
 
   const second = migrateSnapshot(first.document!);
   assert.deepEqual(second.diagnostics, []);
   assert.deepEqual(second.document, first.document);
   assert.deepEqual(second.report?.appliedSteps, []);
+});
+
+test('migrates a legacy v0.1.0 snapshot into observation-aware v0.2.0 metadata', async () => {
+  const fixture = resolve(dirname(fileURLToPath(import.meta.url)), '../fixtures/minimal-success');
+  const source = {
+    manifest: JSON.parse(await readFile(join(fixture, 'manifest.json'), 'utf8')) as unknown,
+    events: (await readFile(join(fixture, 'events.jsonl'), 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as unknown),
+  };
+  const result = migrateSnapshot(source);
+
+  assert.deepEqual(result.diagnostics, []);
+  assert.deepEqual(
+    result.report?.appliedSteps.map((step) => [step.from, step.to]),
+    [['0.1.0', '0.2.0']],
+  );
+  assert.deepEqual(readSnapshotObservationMetadata(result.document?.manifest), {
+    source: 'native',
+    completeness: 'complete',
+    limitations: [],
+  });
+  assert.equal(validateSnapshot(result.document!).valid, true);
 });
 
 test('writes migrated snapshots to a new directory and leaves the source bytes unchanged', async () => {

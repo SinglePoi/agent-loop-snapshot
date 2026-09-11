@@ -82,10 +82,17 @@ interface Semver {
   readonly patch: number;
 }
 
-const initialMigration: SnapshotMigrationStep = {
+const legacyMigration: SnapshotMigrationStep = {
   from: '0.0.0',
-  to: snapshotSchemaVersion,
+  to: '0.1.0',
   description: 'Normalize v0.0.0 persisted object version markers to Snapshot Schema v0.1.0.',
+};
+
+const observationMigration: SnapshotMigrationStep = {
+  from: '0.1.0',
+  to: snapshotSchemaVersion,
+  description:
+    'Add v0.2.0 observation provenance and completeness metadata without changing recorded facts.',
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -152,7 +159,7 @@ export function inspectSnapshotCompatibility(manifest: unknown): SnapshotCompati
       reason: 'Snapshot matches the current schema exactly.',
     };
   }
-  if (sourceVersion === initialMigration.from) {
+  if (sourceVersion === legacyMigration.from || sourceVersion === observationMigration.from) {
     return {
       sourceVersion,
       status: 'migratable',
@@ -198,6 +205,23 @@ function cloneDocument(document: SnapshotDocument): SnapshotDocument {
   return structuredClone(document);
 }
 
+function addObservationMetadata(document: SnapshotDocument): SnapshotDocument {
+  const migrated = cloneDocument(document);
+  if (!isRecord(migrated.manifest)) {
+    return migrated;
+  }
+  const incomplete = migrated.manifest.run_state === 'incomplete';
+  migrated.manifest = {
+    ...migrated.manifest,
+    source: 'native',
+    completeness: incomplete ? 'partial' : 'complete',
+    limitations: incomplete
+      ? [{ code: 'recording_failed', message: 'Legacy snapshot was recorded as incomplete.' }]
+      : [],
+  };
+  return migrated;
+}
+
 export function migrateSnapshot(document: SnapshotDocument): SnapshotMigrationResult {
   const compatibility = inspectSnapshotCompatibility(document.manifest);
   if (compatibility.sourceVersion === undefined) {
@@ -234,14 +258,28 @@ export function migrateSnapshot(document: SnapshotDocument): SnapshotMigrationRe
     };
   }
 
-  const migrated =
-    compatibility.sourceVersion === snapshotSchemaVersion
-      ? cloneDocument(document)
-      : (replaceVersion(
-          document,
-          compatibility.sourceVersion,
-          snapshotSchemaVersion,
-        ) as SnapshotDocument);
+  let migrated = cloneDocument(document);
+  const appliedSteps: SnapshotMigrationStep[] = [];
+  if (compatibility.sourceVersion === legacyMigration.from) {
+    migrated = replaceVersion(
+      migrated,
+      legacyMigration.from,
+      legacyMigration.to,
+    ) as SnapshotDocument;
+    appliedSteps.push(legacyMigration);
+  }
+  if (
+    compatibility.sourceVersion === legacyMigration.from ||
+    compatibility.sourceVersion === observationMigration.from
+  ) {
+    migrated = replaceVersion(
+      migrated,
+      observationMigration.from,
+      observationMigration.to,
+    ) as SnapshotDocument;
+    migrated = addObservationMetadata(migrated);
+    appliedSteps.push(observationMigration);
+  }
   const validation = validateSnapshot(migrated);
   if (!validation.valid) {
     return {
@@ -260,7 +298,7 @@ export function migrateSnapshot(document: SnapshotDocument): SnapshotMigrationRe
     report: {
       sourceVersion: compatibility.sourceVersion,
       targetVersion: snapshotSchemaVersion,
-      appliedSteps: compatibility.sourceVersion === snapshotSchemaVersion ? [] : [initialMigration],
+      appliedSteps,
     },
     diagnostics: [],
   };

@@ -1,6 +1,8 @@
-import type { SnapshotSchemaVersion } from './protocol.js';
+import type { SupportedSnapshotSchemaVersion, WorkflowSchemaVersion } from './protocol.js';
+import type { SnapshotCompleteness, SnapshotLimitation, SnapshotSource } from './observation.js';
 
 export * from './protocol.js';
+export * from './observation.js';
 
 export type JsonPrimitive = string | number | boolean | null;
 
@@ -20,6 +22,7 @@ export type EventType =
   | 'run.started'
   | 'run.completed'
   | 'run.failed'
+  | 'run.observed'
   | 'model.requested'
   | 'model.completed'
   | 'model.failed'
@@ -29,10 +32,11 @@ export type EventType =
   | 'decision.recorded'
   | 'state.changed'
   | 'checkpoint.created'
-  | 'verification.completed';
+  | 'verification.completed'
+  | 'otel.span';
 
 export interface ArtifactReference {
-  schema_version: SnapshotSchemaVersion;
+  schema_version: SupportedSnapshotSchemaVersion;
   digest: string;
   media_type: string;
   byte_length: number;
@@ -62,7 +66,7 @@ export interface EventEnvelope<
   TType extends string = EventType,
   TPayload = JsonObject | ArtifactReference,
 > {
-  schema_version: SnapshotSchemaVersion;
+  schema_version: SupportedSnapshotSchemaVersion;
   run_id: RunId;
   event_id: EventId;
   parent_ids: EventId[];
@@ -82,10 +86,10 @@ export interface RuntimeDescriptor {
 }
 
 export type RunState = 'running' | 'finished' | 'incomplete';
-export type TerminalStatus = 'completed' | 'failed' | 'aborted';
+export type TerminalStatus = 'completed' | 'failed' | 'aborted' | 'unknown';
 
 export interface SnapshotManifest {
-  schema_version: SnapshotSchemaVersion;
+  schema_version: SupportedSnapshotSchemaVersion;
   snapshot_type: 'run-snapshot';
   run_id: RunId;
   created_at: string;
@@ -93,6 +97,10 @@ export interface SnapshotManifest {
   run_state: RunState;
   terminal_status: TerminalStatus | null;
   runtime: RuntimeDescriptor;
+  /** Required for persisted v0.2.0 snapshots; absent only on read legacy v0.1.0 snapshots. */
+  source?: SnapshotSource;
+  completeness?: SnapshotCompleteness;
+  limitations?: SnapshotLimitation[];
   last_sequence: number;
   event_count: number;
   root_event_id?: EventId;
@@ -100,7 +108,7 @@ export interface SnapshotManifest {
 }
 
 export interface Checkpoint {
-  schema_version: SnapshotSchemaVersion;
+  schema_version: SupportedSnapshotSchemaVersion;
   checkpoint_id: CheckpointId;
   run_id: RunId;
   created_at: string;
@@ -122,6 +130,20 @@ export interface RunCompletedPayload {
 
 export interface RunFailedPayload {
   error: ErrorInfo;
+}
+
+/** A source terminal observation that does not claim a reconstructible state. */
+export interface RunObservedPayload {
+  outcome: 'completed' | 'failed' | 'unknown';
+  summary?: string;
+}
+
+/** Generic span representation used for observation-only OpenTelemetry imports. */
+export interface OtelSpanPayload {
+  trace_id: string;
+  span_id: string;
+  name: string;
+  status: 'ok' | 'error' | 'unset';
 }
 
 export interface ModelRequestedPayload {
@@ -297,7 +319,7 @@ export type WorkflowNode =
  * into this same document before validation or execution.
  */
 export interface WorkflowDocument {
-  schema_version: SnapshotSchemaVersion;
+  schema_version: WorkflowSchemaVersion;
   workflow_type: 'agent-workflow';
   workflow_id: WorkflowId;
   name: string;

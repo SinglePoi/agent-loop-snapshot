@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agent-loop-snapshot.dev/schema/0.1.0/events.schema.json",
+  "$id": "https://agent-loop-snapshot.dev/schema/0.2.0/events.schema.json",
   "title": "Agent Loop Snapshot Event Envelope",
   "description": "An append-only event envelope. Known event types receive payload validation; unknown event types remain readable as opaque events and must not be executed.",
   "type": "object",
@@ -19,7 +19,7 @@
   ],
   "properties": {
     "schema_version": {
-      "const": "0.1.0"
+      "enum": ["0.1.0", "0.2.0"]
     },
     "run_id": {
       "$ref": "#/$defs/runId"
@@ -85,6 +85,20 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "properties": { "type": { "const": "run.observed" } },
+        "required": ["type"]
+      },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/runObservedPayload" } } }
+    },
+    {
+      "if": {
+        "properties": { "type": { "const": "otel.span" } },
+        "required": ["type"]
+      },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/otelSpanPayload" } } }
     },
     {
       "if": {
@@ -309,7 +323,7 @@
       "required": ["schema_version", "digest", "media_type", "byte_length"],
       "properties": {
         "schema_version": {
-          "const": "0.1.0"
+          "enum": ["0.1.0", "0.2.0"]
         },
         "digest": {
           "type": "string",
@@ -482,6 +496,36 @@
             "error": {
               "$ref": "#/$defs/error"
             }
+          }
+        }
+      ]
+    },
+    "runObservedPayload": {
+      "anyOf": [
+        { "$ref": "#/$defs/artifactReference" },
+        {
+          "$ref": "#/$defs/payloadObject",
+          "type": "object",
+          "required": ["outcome"],
+          "properties": {
+            "outcome": { "enum": ["completed", "failed", "unknown"] },
+            "summary": { "type": "string" }
+          }
+        }
+      ]
+    },
+    "otelSpanPayload": {
+      "anyOf": [
+        { "$ref": "#/$defs/artifactReference" },
+        {
+          "$ref": "#/$defs/payloadObject",
+          "type": "object",
+          "required": ["trace_id", "span_id", "name", "status"],
+          "properties": {
+            "trace_id": { "type": "string", "minLength": 1 },
+            "span_id": { "type": "string", "minLength": 1 },
+            "name": { "type": "string", "minLength": 1 },
+            "status": { "enum": ["ok", "error", "unset"] }
           }
         }
       ]

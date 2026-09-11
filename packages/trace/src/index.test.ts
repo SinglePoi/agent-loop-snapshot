@@ -314,7 +314,7 @@ test('retains unknown-version events and reports schema diagnostics', async () =
   assert.equal(snapshot.events.length, 1);
   assert.equal(snapshot.query.getEventsByType('run.started').length, 1);
   assert.equal(snapshot.valid, false);
-  assert.ok(snapshot.diagnostics.some((diagnostic) => diagnostic.code === 'SCHEMA_CONST'));
+  assert.ok(snapshot.diagnostics.some((diagnostic) => diagnostic.code === 'SCHEMA_ENUM'));
 });
 
 test('reports malformed JSONL tails while keeping complete preceding events', async () => {

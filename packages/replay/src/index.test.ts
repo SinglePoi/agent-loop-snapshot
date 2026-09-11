@@ -40,6 +40,19 @@ import {
   selectReplayResumePoint,
 } from './index.js';
 
+function asOtelObservation<T extends Awaited<ReturnType<typeof loadTraceSnapshot>>>(trace: T): T {
+  return {
+    ...trace,
+    manifest: {
+      ...trace.manifest!,
+      schema_version: '0.2.0',
+      source: 'otel-import',
+      completeness: 'complete',
+      limitations: [],
+    },
+  } as T;
+}
+
 async function loadExampleTrace() {
   const fixture = resolve(
     dirname(fileURLToPath(import.meta.url)),
@@ -1124,6 +1137,23 @@ test('mock replay reproduces the fixture state in a new audited replay trace', a
   assert.equal(events.filter((event) => event.type === 'tool.failed').length, 1);
   assert.equal(events.filter((event) => event.type === 'checkpoint.created').length, 1);
   assert.equal(events.at(-1)?.type, 'run.completed');
+});
+
+test('blocks observation-only traces from compilation and replay entry points', async () => {
+  const source = asOtelObservation(await loadExampleTrace());
+  const compilation = compileTraceToWorkflow(source);
+  assert.equal(compilation.workflow, undefined);
+  assert.equal(compilation.diagnostics[0]?.code, 'SOURCE_TRACE_OBSERVATION_ONLY');
+
+  const mock = await new MockReplayRunner({ source, recorder: new Recorder() }).run();
+  assert.equal(mock.diagnostics[0]?.code, 'SOURCE_TRACE_OBSERVATION_ONLY');
+
+  const verified = await new VerifiedReplayRunner({
+    source,
+    recorder: new Recorder(),
+    adapters: new ReplayAdapterRegistry(),
+  }).run();
+  assert.equal(verified.diagnostics[0]?.code, 'SOURCE_TRACE_OBSERVATION_ONLY');
 });
 
 test('default state redaction keeps whole logical values consistent through mock replay', async () => {
