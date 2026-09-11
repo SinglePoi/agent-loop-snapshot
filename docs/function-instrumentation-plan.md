@@ -1,6 +1,6 @@
 # 低侵入采集、OpenTelemetry 导入与外部平台导出开发计划
 
-更新时间：2026-09-11。状态：CAP-01 至 CAP-05 已完成；CAP-06 及其余任务待实现，交给 coding agent 执行。
+更新时间：2026-09-11。状态：CAP-01 至 CAP-08 已完成；EXP-01 及其余导出任务待实现，交给 coding agent 执行。
 
 本文替代原函数包装计划，保留文件路径。所有新增 API、命令和能力均为待实现目标，不能按已实现功能宣传。
 
@@ -306,6 +306,25 @@ flush/shutdown 有 deadline，超时保留队列并报告未发送数量；重�
 - OpenAI Chat Completions、Responses，以及 Anthropic Messages 的 `create()` 非流式调用都在真实 SDK 配合本地 HTTP fixture 下验证。包装直接返回原 SDK Promise-like 对象，覆盖了 OpenAI `.withResponse()` 可用性，且保持 `this`、业务错误、取消和 SDK 内部重试的原始行为；
 - OpenAI Chat Completions 和 Anthropic Messages 的 `stream: true` 均使用惰性 async-iterator 包装：只在业务消费者推进迭代时观察，不预读或重复请求；完整消费、流错误和提前 `break` 都会产生相应的完成/失败/限制记录。未消费流由既有有界 drain 标记为 partial；
 - 默认采集内容副本并使用 Recorder 的默认脱敏管线，`metadata-only` 模式不会持久化 prompt 或完整响应正文。通用包装进入同一 run 时继续使用 suppression 避免重复记录。
+
+**CAP-06 完成记录（2026-09-11）**
+
+- 已新增 `@agent-loop-snapshot/otel-import`。`importOtlpTraces()` 只接受已解析的 OTLP/HTTP JSON `ExportTraceServiceRequest`，不读取属性引用的文件或 URL、也不写盘；CAP-07 将负责文件输入、脱敏后持久化和 CLI。
+- 导入器验证非零十六进制 trace/span ID，保留小写来源 ID 与 `startTimeUnixNano` / `endTimeUnixNano` 的十进制字符串，使用 `BigInt` 计算稳定拓扑顺序和展示偏移，避免 64 位时间精度丢失。资源、scope、属性、事件和 links 以受限 JSON 观察数据保留。
+- 重复同内容 span 被去重；冲突 ID、负时长、非法 ID、自父/环、缺父、源 drop 和超限均形成确定诊断与 `partial` 限制。无已知缺损的历史 trace 保持 `unknown`，不推断为 `complete`。
+- 提供 `toObservationSnapshot()` 纯映射：固定的合法稳定本地 ID、`otel.span` 和 `run.observed`，来源永远为 `otel-import`、终态永远不伪造可恢复状态。固定 `otel-genai-1.0` profile 可描述已知 GenAI 操作；`execute_tool` 仍只记录为观察语义并添加 `unknown_side_effect`，不会生成 `tool.*` 事件。
+
+**CAP-07 完成记录（2026-09-11）**
+
+- CLI 已提供 `alsnap import-otel <otlp-json-file> [more-files...] --output <snapshot-directory> [--json]`。它合并多个已解析为 OTLP/HTTP JSON 的 `resourceSpans` 输入，并按 source trace 生成独立、稳定命名的观察快照目录；同名目录存在时明确拒绝，不覆盖既有快照。
+- 每个输入在读取前限制为 64 MiB 的常规文件；JSON 或 OTLP 容器错误会报告而不开始导入。输入只会解析数据，绝不解引用属性中的路径或 URL。机器可读报告包含目录、源 trace ID、导入/拒绝/去重/截断计数、完整度、限制和诊断。
+- 写盘使用 `SnapshotWriter` 的原子 manifest 提交，并在每个 `otel.span` 落盘前运行默认 RedactionPipeline 及导入属性敏感字段规则。导入后的目录再次 schema 校验；快照可通过 `inspect` 和 `graph` 查看，既有 replay 门禁继续拒绝 `otel-import` 来源。
+
+**CAP-08 完成记录（2026-09-11）**
+
+- 已新增三条可离线执行的示例：通用 `instrument()` 函数/工具包装、真实 OpenAI SDK 对本地 HTTP fixture 的自动采集，以及 OTLP JSON 导入。示例不需要真实 API key、付费请求或生产 trace；`pnpm run examples:check` 会执行三者。
+- README 已更新为 v0.2 观察快照语义，并说明入口选择、可见范围、固定支持版本、ESM/CJS 初始化与打包限制、流行为、strict/best-effort 故障模式、OTLP 导入边界及 observation-only 执行限制。未实现的外部导出配置被明确标为后续 EXP 工作。
+- release smoke 已覆盖打包消费者对通用包装、OpenAI integration 依赖图和 OTLP 导入的加载/离线闭环；新增 tarball 依赖随消费者安装，避免从 registry 错误拉取 workspace 包。
 
 CAP-06 可在 CAP-02 后独立实施；可由单个 coding agent 顺序完成，不要求委派或创建外部任务。
 

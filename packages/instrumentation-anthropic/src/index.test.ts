@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
-import { createServer, type Server } from 'node:http';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';

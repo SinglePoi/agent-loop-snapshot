@@ -1,0 +1,36 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          { "key": "service.name", "value": { "stringValue": "offline-otel-example" } }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": { "name": "offline-fixture", "version": "1.0.0" },
+          "spans": [
+            {
+              "traceId": "11111111111111111111111111111111",
+              "spanId": "2222222222222222",
+              "name": "offline root",
+              "startTimeUnixNano": "1700000000000000000",
+              "endTimeUnixNano": "1700000001000000000",
+              "status": { "code": 2 }
+            },
+            {
+              "traceId": "11111111111111111111111111111111",
+              "spanId": "3333333333333333",
+              "parentSpanId": "2222222222222222",
+              "name": "offline child",
+              "startTimeUnixNano": "1700000000100000000",
+              "attributes": [
+                { "key": "api_key", "value": { "stringValue": "example-secret-not-persisted" } }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -2,7 +2,7 @@
 
 Agent Loop Snapshot 是一个面向 Agent Runtime 的运行记录、可视化与回放工具。它把一次 Agent Loop 中的模型调用、工具调用、状态变化、检查点和产物保存为可移植快照，并可进一步生成流程图或编译为可执行工作流，让另一个 Agent 在明确的权限和验证规则下复现任务。
 
-> 当前状态：基础协议、Recorder、耐崩溃写入、Artifact Store、Checkpoint Store、Trace Loader、Graph Projector 和 CLI 已实现；Replay Adapter、Policy Engine、Mock Replay、Checkpoint Resume、Verified Replay、Workflow IR v0.1、Trace Compiler、Semantic Replay 与跨 Runtime 兼容性套件已就绪，后续进入稳定化与发布阶段。
+> 当前状态：Snapshot 协议 v0.2、通用函数包装、OpenAI/Anthropic SDK 自动采集、OTLP JSON 离线导入、Recorder、查看、图投影与回放门禁均已实现。OTLP 导入快照是 observation-only；外部 OTLP 导出仍在后续 EXP 阶段，尚无默认云端目的地或发送配置。
 
 ## 项目目标
 
@@ -24,9 +24,9 @@ Agent Loop Snapshot 是一个面向 Agent Runtime 的运行记录、可视化与
 - **Workflow IR**：从 Trace 提炼出的可参数化执行流程。
 - **Replay**：使用记录结果、重新调用工具，或交给另一个 Agent 语义复现。
 
-## Snapshot Schema v0.1
+## Snapshot Schema v0.2
 
-`packages/schema/schemas/` 提供 JSON Schema 2020-12 定义，覆盖 `manifest.json`、`events.jsonl` 中的事件包络、checkpoint 和 artifact reference。所有持久化对象都必须携带 `schema_version: "0.1.0"`。
+`packages/schema/schemas/` 提供 JSON Schema 2020-12 定义，覆盖 `manifest.json`、`events.jsonl` 中的事件包络、checkpoint 和 artifact reference。新快照使用 `schema_version: "0.2.0"`；读取器继续兼容既有 `0.1.0` 快照。
 
 Workflow IR 使用同一版本线，但它是独立的 `agent-workflow` 文档，而非 Run Snapshot 的一部分。`workflow.schema.json` 与 `validateWorkflow()` 定义了输入、节点、依赖、条件、重试、输出、验证器和权限元数据；JSON 与 YAML 都应先解析为普通对象，再由同一校验器验证。完整格式见 [Workflow IR v0.1](docs/workflow-ir-v0.1.md)。
 
@@ -56,7 +56,7 @@ Recorder 包提供 `startRun`、`appendEvent`、`checkpoint`、`completeRun` 和
 
 `Graph` 包提供因果 DAG、调用树和线性时间线投影。DAG 保留并行分支和多父节点汇合；投影支持 actor、事件类型、状态和 sequence 范围过滤，并默认折叠连续模型流式事件和低层噪声，同时保留每个图节点对应的源 event ID。
 
-`CLI` 包提供 `alsnap validate`、`alsnap inspect` 和 `alsnap graph`。`validate` 检查快照并输出诊断，`inspect` 输出不包含 payload 的运行摘要，`graph` 默认导出 Mermaid DAG，也支持调用树、时间线和 JSON。退出码为 `0`（成功）、`2`（快照校验失败）和 `1`（参数或运行错误）；所有命令支持 `--json` 机器可读输出。
+`CLI` 包提供 `alsnap validate`、`alsnap inspect`、`alsnap graph`、`alsnap replay` 和 `alsnap import-otel`。`validate` 检查快照并输出诊断，`inspect` 输出不包含 payload 的运行摘要，`graph` 默认导出 Mermaid DAG，也支持调用树、时间线和 JSON。退出码为 `0`（成功）、`2`（快照校验失败或无有效导入 trace）和 `1`（参数或运行错误）；所有命令支持 `--json` 机器可读输出。
 
 ## 总体架构
 
@@ -117,6 +117,10 @@ packages/
 ├── trace/        # 加载、查询、状态重建
 ├── graph/        # DAG、时间线和 Mermaid 投影
 ├── replay/       # 三种回放执行器及安全策略
+├── instrumentation/ # 通用异步函数包装与运行上下文
+├── instrumentation-openai/ # OpenAI SDK 自动采集
+├── instrumentation-anthropic/ # Anthropic SDK 自动采集
+├── otel-import/  # OTLP/HTTP JSON 解析与观察快照映射
 ├── cli/          # validate、inspect、graph、replay
 └── example-runtime/ # 框架无关的模型/工具 adapter 示例 Runtime
 apps/
@@ -178,6 +182,61 @@ try {
 并产生一次诊断。流未被消费或在 drain deadline 后仍未结束时，快照标记为 partial
 且不可执行；提前结束会额外标记 `stream_ended_early`。SDK 内部重试不会被伪造为
 独立 attempt。
+
+## 采集与导入入口
+
+| 入口                                      | 适用场景                         | 产生的快照                                                |
+| ----------------------------------------- | -------------------------------- | --------------------------------------------------------- |
+| `instrument()`                            | 自有 Promise 模型/工具函数       | 原生运行记录；只有最后显式 checkpoint 才含可恢复状态 hash |
+| `initInstrumentation()` + SDK integration | 继续使用 OpenAI/Anthropic 原 SDK | SDK 观察记录；不自动记录应用最终状态                      |
+| `alsnap import-otel`                      | 已有 OTLP/HTTP JSON trace 文件   | `otel-import` 观察快照；永远不可 replay/resume/compile    |
+
+通用入口要求每个工具显式声明 `sideEffect`，并仅复制、脱敏记录副本；业务参数、返回值、
+错误和 `this` 不会被替换。默认模式是 strict：请求记录失败时不执行业务函数，调用后记录
+失败会抛记录错误。SDK 自动集成使用 best-effort：记录故障只产生诊断，保留 SDK 的原结果
+或原错误。三种入口都不会扫描局部变量、自动保存大对象、或把模型返回值伪装成可恢复状态。
+
+OpenAI `7.15.0` 支持 Chat Completions 与 Responses 的 `create()`；Anthropic `0.125.0`
+支持 Messages `create()`。两者先支持非流式，再支持 `stream: true` 的异步迭代。调用方必须
+在迭代流时才会被观测；采集器不会预读、缓冲或发起第二个请求。专用 `.stream()` helper、
+Azure、Bedrock、Vertex 客户端以及不在固定版本范围内的 SDK 不受支持。
+
+自动集成必须在加载业务模块前初始化。ESM 使用动态 `import()`；CJS 使用 `require()` 放在
+初始化之后。已经加载 SDK、经过打包器静态内联、或第三方随后替换方法的场景不保证被捕获；
+本项目不重写 Node 模块加载器，也不替换应用的全局 OpenTelemetry provider/context manager。
+
+### 三个离线示例
+
+所有示例均无真实 API key、付费请求或生产 trace。先执行 `pnpm build`，然后可分别运行：
+
+```sh
+node examples/function-instrumentation/demo.mjs
+node examples/sdk-instrumentation/demo.mjs
+pnpm alsnap -- import-otel examples/otel-import/trace.json --output ./runs/otel-import --json
+```
+
+也可通过 `pnpm run examples:check` 一次运行三条离线闭环。示例详情位于
+[`examples/function-instrumentation`](examples/function-instrumentation/README.md)、
+[`examples/sdk-instrumentation`](examples/sdk-instrumentation/README.md) 和
+[`examples/otel-import`](examples/otel-import/README.md)。
+
+### OTLP JSON 导入
+
+```sh
+pnpm alsnap -- import-otel trace-a.json trace-b.json --output ./imported-runs --json
+pnpm alsnap -- inspect ./imported-runs/run_<generated-id> --json
+pnpm alsnap -- graph ./imported-runs/run_<generated-id> --kind timeline --format json
+```
+
+仅接受 OTLP/HTTP JSON 的 `ExportTraceServiceRequest`（`resourceSpans`）；protobuf、gRPC、
+控制台文本及厂商 UI 导出格式不支持。每个常规输入文件上限为 64 MiB，多个文件会在一次导入中
+合并并按 source trace 拆为独立目录。导入前会脱敏常见凭据字段与 token 模式，既有目录绝不覆盖。
+报告包含源 trace ID、导入/拒绝/去重/截断计数、完整度、限制和诊断。
+
+`otel-import` 快照即使结构有效也只是可查看证据：缺损会标为 `partial`，未发现缺损仅为
+`unknown`，绝不因此变为 `complete` 或可执行。`inspect` 和 `graph` 可使用；`replay`、
+恢复与 Workflow 编译会拒绝它。OTLP 导入不会发送任何数据到外部平台；外部 OTLP 导出及其
+endpoint、鉴权、内容策略配置仍未实现。
 
 基础检查和图导出命令已经可用：
 

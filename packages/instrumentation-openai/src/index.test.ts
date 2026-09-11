@@ -171,7 +171,10 @@ test('marks an OpenAI stream partial when its consumer ends early', async () => 
         messages: [{ role: 'user', content: 'break' }],
         stream: true,
       });
-      for await (const _event of stream) break;
+      for await (const event of stream) {
+        void event;
+        break;
+      }
     });
     const runDirectory = join(directory, (await readdir(directory))[0]!);
     const manifest = JSON.parse(await readFile(join(runDirectory, 'manifest.json'), 'utf8')) as {
