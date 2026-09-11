@@ -1,0 +1,20 @@
+{
+  "name": "@agent-loop-snapshot/otel-export",
+  "version": "0.1.0",
+  "private": true,
+  "files": [
+    "dist",
+    "!dist/**/*.test.*",
+    "!dist/tsconfig.tsbuildinfo"
+  ],
+  "type": "module",
+  "dependencies": {
+    "@agent-loop-snapshot/schema": "workspace:*"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  }
+}
