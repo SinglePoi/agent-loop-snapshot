@@ -4,7 +4,7 @@
 
 Agent Loop Snapshot 是一个面向 Agent Runtime 的开源运行记录、检查、可视化与回放工具。它将一次 Agent Loop 中的模型调用、工具调用、状态变化、检查点和产物保存为可移植快照，帮助你审计运行过程、调试控制流，并在明确的权限和验证规则下复现任务。
 
-项目已在 [GitHub](https://github.com/SinglePoi/agent-loop-snapshot) 开源，核心包已发布到 npm。当前公开版本为 `0.1.1`。
+项目已在 [GitHub](https://github.com/SinglePoi/agent-loop-snapshot) 开源，核心包已发布到 npm。当前公开版本为 `0.1.2`。
 
 > 当前协议版本为 Snapshot Schema `0.2.0`。OTLP 导入快照始终是 observation-only；OTLP 导出没有默认云端目的地，必须由用户显式配置。
 

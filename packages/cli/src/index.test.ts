@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert';
+import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -34,6 +35,38 @@ function captureIo(): { io: CliIo; stdout: string[]; stderr: string[] } {
     },
   };
 }
+
+test('CLI executes through the workspace symlink', async () => {
+  const missingDirectory = await mkdtemp(join(tmpdir(), 'alsnap-missing-'));
+  await rm(missingDirectory, { recursive: true, force: true });
+  const cliEntry = resolve(
+    process.cwd(),
+    'node_modules',
+    '@agent-loop-snapshot',
+    'cli',
+    'dist',
+    'index.js',
+  );
+
+  assert.equal(existsSync(cliEntry), true);
+  const result = spawnSync(process.execPath, [cliEntry, 'validate', missingDirectory, '--json'], {
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, cliExitCodes.validationFailed);
+  assert.equal(result.stderr, '');
+  const output = JSON.parse(result.stdout) as {
+    command: string;
+    directory: string;
+    valid: boolean;
+    diagnostics: unknown[];
+  };
+  assert.equal(output.command, 'validate');
+  assert.equal(output.directory, missingDirectory);
+  assert.equal(output.valid, false);
+  assert.ok(output.diagnostics.length > 0);
+});
 
 test('validate emits stable JSON and succeeds for the golden snapshot', async () => {
   const captured = captureIo();

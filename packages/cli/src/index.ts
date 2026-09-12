@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { mkdir, readFile, stat } from 'node:fs/promises';
 import { basename, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -40,7 +40,7 @@ import {
 } from '@agent-loop-snapshot/otel-export';
 
 export const cliPackageName = '@agent-loop-snapshot/cli' as const;
-export const cliVersion = '0.1.0' as const;
+export const cliVersion = '0.1.2' as const;
 
 export const cliExitCodes = {
   success: 0,
@@ -1335,6 +1335,9 @@ export async function runCli(
 }
 
 const entryPath = process.argv[1];
-if (entryPath !== undefined && resolve(entryPath) === fileURLToPath(import.meta.url)) {
+if (
+  entryPath !== undefined &&
+  realpathSync(resolve(entryPath)) === realpathSync(fileURLToPath(import.meta.url))
+) {
   process.exitCode = await runCli();
 }
