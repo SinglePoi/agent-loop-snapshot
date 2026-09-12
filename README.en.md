@@ -1,6 +1,6 @@
 # Agent Loop Snapshot
 
-[简体中文](README.md) · [User Guide](docs/user-guide.md) · [npm packages](https://www.npmjs.com/search?q=%40agent-loop-snapshot)
+[简体中文](README.md) · [User Guide](docs/user-guide.en.md) · [npm packages](https://www.npmjs.com/search?q=%40agent-loop-snapshot)
 
 Agent Loop Snapshot is an open-source toolkit for recording, inspecting, visualizing, and replaying Agent Runtime executions. It stores model calls, tool calls, state changes, checkpoints, and artifacts from an Agent Loop as portable snapshots, making it easier to audit runs, debug control flow, and reproduce tasks under explicit permission and verification rules.
 
