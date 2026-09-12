@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import { validateSnapshotDirectory } from '@agent-loop-snapshot/schema';
+import type { OtlpExporter } from '@agent-loop-snapshot/otel-export';
 
 import { instrument } from './index.js';
 
@@ -22,6 +23,110 @@ async function onlySnapshotDirectory(directory: string): Promise<string> {
   assert.equal(children.length, 1);
   return join(directory, children[0]!);
 }
+
+test('queues a committed generic snapshot asynchronously and flushes it on shutdown', async () => {
+  await withAgent(async (directory) => {
+    const exported: string[] = [];
+    const exporter: OtlpExporter = {
+      contractVersion: 'otel-export-1.0',
+      async exportSnapshot(snapshot) {
+        exported.push(snapshot.manifest.run_id);
+        return {
+          state: 'queued',
+          targetAlias: 'fixture',
+          attempted: false,
+          acceptedSpanCount: 0,
+          rejectedSpanCount: 0,
+          attempts: 0,
+        };
+      },
+      async flush() {
+        return {
+          contractVersion: 'otel-export-1.0',
+          deliveries: [],
+          pendingCount: 0,
+          deadlineExceeded: false,
+        };
+      },
+      async shutdown() {
+        return {
+          contractVersion: 'otel-export-1.0',
+          deliveries: [],
+          pendingCount: 0,
+          deadlineExceeded: false,
+        };
+      },
+    };
+    const agent = instrument({
+      snapshotDir: directory,
+      runtime: { name: 'generic-fixture', version: '1.0.0' },
+      model: { name: 'fixture-model', call: async () => 'ok' },
+      tools: {},
+      exporters: [exporter],
+    });
+    assert.equal(await agent.run({ input: { goal: 'export' } }, ({ model }) => model.call()), 'ok');
+    await agent.shutdown();
+    assert.equal(exported.length, 1);
+  });
+});
+
+test('reports incomplete generic exporter flushes without altering business results', async () => {
+  await withAgent(async (directory) => {
+    const diagnostics: string[] = [];
+    const exporter: OtlpExporter = {
+      contractVersion: 'otel-export-1.0',
+      async exportSnapshot() {
+        return {
+          state: 'queued',
+          targetAlias: 'fixture',
+          attempted: false,
+          acceptedSpanCount: 0,
+          rejectedSpanCount: 0,
+          attempts: 0,
+        };
+      },
+      async flush() {
+        return {
+          contractVersion: 'otel-export-1.0',
+          deliveries: [
+            {
+              state: 'rejected',
+              targetAlias: 'fixture',
+              attempted: true,
+              acceptedSpanCount: 0,
+              rejectedSpanCount: 1,
+              attempts: 1,
+              message: 'Fixture target rejected the batch.',
+            },
+          ],
+          pendingCount: 0,
+          deadlineExceeded: false,
+        };
+      },
+      async shutdown() {
+        return {
+          contractVersion: 'otel-export-1.0',
+          deliveries: [],
+          pendingCount: 0,
+          deadlineExceeded: false,
+        };
+      },
+    };
+    const agent = instrument({
+      snapshotDir: directory,
+      runtime: { name: 'generic-fixture', version: '1.0.0' },
+      model: { name: 'fixture-model', call: async () => 'ok' },
+      tools: {},
+      exporters: [exporter],
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.code),
+    });
+
+    assert.equal(await agent.run({ input: { goal: 'export' } }, ({ model }) => model.call()), 'ok');
+    await agent.flushExporters();
+    assert.deepEqual(diagnostics, ['EXPORT_FAILED']);
+    await agent.shutdown();
+  });
+});
 
 test('records paired model and parallel tool calls without changing business values', async () => {
   await withAgent(async (directory) => {

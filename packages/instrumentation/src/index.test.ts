@@ -7,6 +7,7 @@ import test from 'node:test';
 import { pathToFileURL } from 'node:url';
 
 import { validateSnapshotDirectory } from '@agent-loop-snapshot/schema';
+import type { OtlpExporter } from '@agent-loop-snapshot/otel-export';
 
 import {
   initInstrumentation,
@@ -31,6 +32,107 @@ test('patchMethod preserves receiver and does not overwrite a later wrapper on r
   client.create = thirdPartyWrapper as typeof client.create;
   assert.equal(restore(), false);
   assert.equal(client.create('request'), 'third-party');
+});
+
+test('queues a committed SDK snapshot without changing the business result', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'alsnap-instrumentation-export-'));
+  const exported: string[] = [];
+  const exporter: OtlpExporter = {
+    contractVersion: 'otel-export-1.0',
+    async exportSnapshot(snapshot) {
+      exported.push(snapshot.manifest.run_id);
+      return {
+        state: 'queued',
+        targetAlias: 'fixture',
+        attempted: false,
+        acceptedSpanCount: 0,
+        rejectedSpanCount: 0,
+        attempts: 0,
+      };
+    },
+    async flush() {
+      return {
+        contractVersion: 'otel-export-1.0',
+        deliveries: [],
+        pendingCount: 0,
+        deadlineExceeded: false,
+      };
+    },
+    async shutdown() {
+      return {
+        contractVersion: 'otel-export-1.0',
+        deliveries: [],
+        pendingCount: 0,
+        deadlineExceeded: false,
+      };
+    },
+  };
+  const telemetry = initInstrumentation({ snapshotDir: directory, exporters: [exporter] });
+  try {
+    assert.equal(await telemetry.run({}, () => 'business result'), 'business result');
+    await telemetry.shutdown();
+    assert.equal(exported.length, 1);
+  } finally {
+    await telemetry.shutdown();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('reports incomplete SDK exporter shutdowns without changing business results', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'alsnap-instrumentation-export-failure-'));
+  const diagnostics: string[] = [];
+  const exporter: OtlpExporter = {
+    contractVersion: 'otel-export-1.0',
+    async exportSnapshot() {
+      return {
+        state: 'queued',
+        targetAlias: 'fixture',
+        attempted: false,
+        acceptedSpanCount: 0,
+        rejectedSpanCount: 0,
+        attempts: 0,
+      };
+    },
+    async flush() {
+      return {
+        contractVersion: 'otel-export-1.0',
+        deliveries: [],
+        pendingCount: 0,
+        deadlineExceeded: false,
+      };
+    },
+    async shutdown() {
+      return {
+        contractVersion: 'otel-export-1.0',
+        deliveries: [
+          {
+            state: 'rejected',
+            targetAlias: 'fixture',
+            attempted: true,
+            acceptedSpanCount: 0,
+            rejectedSpanCount: 1,
+            attempts: 1,
+            message: 'Fixture target rejected the batch.',
+          },
+        ],
+        pendingCount: 0,
+        deadlineExceeded: false,
+      };
+    },
+  };
+  const telemetry = initInstrumentation({
+    snapshotDir: directory,
+    exporters: [exporter],
+    onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.code),
+  });
+  try {
+    assert.equal(await telemetry.run({}, () => 'business result'), 'business result');
+    await telemetry.shutdown();
+    assert.deepEqual(diagnostics, ['EXPORT_FAILED']);
+  } finally {
+    await telemetry.shutdown();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('suppresses SDK capture for a generic model wrapper but preserves a nested SDK call in a tool', async () => {

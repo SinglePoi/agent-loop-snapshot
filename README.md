@@ -2,7 +2,7 @@
 
 Agent Loop Snapshot 是一个面向 Agent Runtime 的运行记录、可视化与回放工具。它把一次 Agent Loop 中的模型调用、工具调用、状态变化、检查点和产物保存为可移植快照，并可进一步生成流程图或编译为可执行工作流，让另一个 Agent 在明确的权限和验证规则下复现任务。
 
-> 当前状态：Snapshot 协议 v0.2、通用函数包装、OpenAI/Anthropic SDK 自动采集、OTLP JSON 离线导入、Recorder、查看、图投影与回放门禁均已实现。OTLP 导入快照是 observation-only；外部 OTLP 导出仍在后续 EXP 阶段，尚无默认云端目的地或发送配置。
+> 当前状态：Snapshot 协议 v0.2、通用函数包装、OpenAI/Anthropic SDK 自动采集、OTLP JSON 离线导入，以及本地队列驱动的 OTLP/HTTP 导出均已实现。OTLP 导入快照始终是 observation-only；导出没有默认云端目的地，必须由用户显式配置。
 
 ## 项目目标
 
@@ -56,7 +56,7 @@ Recorder 包提供 `startRun`、`appendEvent`、`checkpoint`、`completeRun` 和
 
 `Graph` 包提供因果 DAG、调用树和线性时间线投影。DAG 保留并行分支和多父节点汇合；投影支持 actor、事件类型、状态和 sequence 范围过滤，并默认折叠连续模型流式事件和低层噪声，同时保留每个图节点对应的源 event ID。
 
-`CLI` 包提供 `alsnap validate`、`alsnap inspect`、`alsnap graph`、`alsnap replay` 和 `alsnap import-otel`。`validate` 检查快照并输出诊断，`inspect` 输出不包含 payload 的运行摘要，`graph` 默认导出 Mermaid DAG，也支持调用树、时间线和 JSON。退出码为 `0`（成功）、`2`（快照校验失败或无有效导入 trace）和 `1`（参数或运行错误）；所有命令支持 `--json` 机器可读输出。
+`CLI` 包提供 `alsnap validate`、`alsnap inspect`、`alsnap graph`、`alsnap replay`、`alsnap import-otel` 和 `alsnap export-otel`。`validate` 检查快照并输出诊断，`inspect` 输出不包含 payload 的运行摘要，`graph` 默认导出 Mermaid DAG，也支持调用树、时间线和 JSON。退出码为 `0`（成功）、`2`（快照校验失败、无有效导入 trace 或导出未完整接受）和 `1`（参数或运行错误）；所有命令支持 `--json` 机器可读输出。
 
 ## 总体架构
 
@@ -121,7 +121,8 @@ packages/
 ├── instrumentation-openai/ # OpenAI SDK 自动采集
 ├── instrumentation-anthropic/ # Anthropic SDK 自动采集
 ├── otel-import/  # OTLP/HTTP JSON 解析与观察快照映射
-├── cli/          # validate、inspect、graph、replay
+├── otel-export/  # 快照 OTLP 映射、脱敏队列与 HTTP 导出
+├── cli/          # validate、inspect、graph、replay、OTLP import/export
 └── example-runtime/ # 框架无关的模型/工具 adapter 示例 Runtime
 apps/
 └── viewer/       # 可选的交互式查看器
@@ -235,8 +236,47 @@ pnpm alsnap -- graph ./imported-runs/run_<generated-id> --kind timeline --format
 
 `otel-import` 快照即使结构有效也只是可查看证据：缺损会标为 `partial`，未发现缺损仅为
 `unknown`，绝不因此变为 `complete` 或可执行。`inspect` 和 `graph` 可使用；`replay`、
-恢复与 Workflow 编译会拒绝它。OTLP 导入不会发送任何数据到外部平台；外部 OTLP 导出及其
-endpoint、鉴权、内容策略配置仍未实现。
+恢复与 Workflow 编译会拒绝它。OTLP 导入不会自动发送任何数据到外部平台，必须由用户显式导出。
+
+### OTLP/HTTP 导出
+
+`@agent-loop-snapshot/otel-export` 的 `createOtlpExporter(config)` 可传给 `instrument()` 或
+`initInstrumentation()` 的 `exporters`。本地快照原子提交后才异步入队；发送失败不会改变模型、工具
+或业务回调的结果。调用 `shutdown()` 会在有界队列 flush 后返回。默认 `metadata-only`，不会发送模型
+输入/输出、工具参数/结果、状态值、异常消息或任意自由文本；只有显式 `redacted-content` 才会经过独立
+出站脱敏后发送内容。
+
+```json
+{
+  "targetAlias": "local-collector",
+  "endpointEnv": "OTLP_TRACES_ENDPOINT",
+  "headersEnv": { "Authorization": "OTLP_AUTHORIZATION" },
+  "serviceName": "my-agent",
+  "queueDir": "./runs/otlp-queue",
+  "contentPolicy": "metadata-only",
+  "batchSpanLimit": 512,
+  "timeoutMs": 10000,
+  "retryMaxAttempts": 3,
+  "retryBudgetMs": 30000
+}
+```
+
+凭据只以环境变量名出现在配置中，并且只在发送时解析；它们不会写入快照、发送队列、报告或日志。完整
+endpoint 与 `endpointEnv` 二选一。`endpoint` 默认必须是 HTTPS；仅 loopback 本地测试 endpoint 可用 HTTP。
+
+```sh
+# 只检查映射、内容过滤和损失；不联网、不入队、不读取凭据
+pnpm alsnap -- export-otel ./runs/run-123 --config ./export.json --dry-run --json
+
+# 入队并等待所有批次被完整接受
+pnpm alsnap -- export-otel ./runs/run-123 --config ./export.json --json
+
+# 重启后只续传该配置指纹匹配的本地队列
+pnpm alsnap -- export-otel --resume --config ./export.json --json
+```
+
+固定版本 Collector 验证、Langtrace 与 Grafana Cloud 的协议/鉴权边界及兼容矩阵见
+[OTLP/HTTP 导出与平台接入](docs/otel-export.md)。
 
 基础检查和图导出命令已经可用：
 
@@ -285,6 +325,7 @@ pnpm run alsnap -- workflow run ./runs/run-123/workflow.yaml
 
 ## 文档
 
+- [用户使用手册](docs/user-guide.md)
 - [实施规划与任务清单](docs/implementation-plan.md)
 - [开发交接记录](docs/handoff.md)
 - [ALS-502 性能、并发与故障注入](docs/benchmarks/als-502.md)

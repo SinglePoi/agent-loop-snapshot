@@ -44,6 +44,9 @@ importers:
       '@agent-loop-snapshot/graph':
         specifier: workspace:*
         version: link:../graph
+      '@agent-loop-snapshot/otel-export':
+        specifier: workspace:*
+        version: link:../otel-export
       '@agent-loop-snapshot/otel-import':
         specifier: workspace:*
         version: link:../otel-import
@@ -80,6 +83,9 @@ importers:
 
   packages/instrumentation:
     dependencies:
+      '@agent-loop-snapshot/otel-export':
+        specifier: workspace:*
+        version: link:../otel-export
       '@agent-loop-snapshot/recorder':
         specifier: workspace:*
         version: link:../recorder

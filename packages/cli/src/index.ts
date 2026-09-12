@@ -32,6 +32,12 @@ import {
 } from '@agent-loop-snapshot/recorder';
 import { MockReplayRunner } from '@agent-loop-snapshot/replay';
 import { importOtlpTraces, toObservationSnapshot } from '@agent-loop-snapshot/otel-import';
+import {
+  createOtlpExporter,
+  dryRunOtlpExport,
+  isExportEndpointConfigured,
+  type OtelExportConfig,
+} from '@agent-loop-snapshot/otel-export';
 
 export const cliPackageName = '@agent-loop-snapshot/cli' as const;
 export const cliVersion = '0.1.0' as const;
@@ -42,7 +48,7 @@ export const cliExitCodes = {
   validationFailed: 2,
 } as const;
 
-type CommandName = 'validate' | 'inspect' | 'graph' | 'replay' | 'import-otel';
+type CommandName = 'validate' | 'inspect' | 'graph' | 'replay' | 'import-otel' | 'export-otel';
 type OutputFormat = 'text' | 'json' | 'mermaid';
 type ReplayMode = 'mock';
 
@@ -119,6 +125,9 @@ interface ParsedCommand {
   readonly replayMode?: ReplayMode;
   readonly outputDirectory?: string;
   readonly inputFiles?: readonly string[];
+  readonly configFile?: string;
+  readonly dryRun?: boolean;
+  readonly resume?: boolean;
 }
 
 class CliUsageError extends Error {
@@ -185,7 +194,8 @@ function parseCommand(argv: readonly string[]): ParsedCommand {
     commandValue !== 'inspect' &&
     commandValue !== 'graph' &&
     commandValue !== 'replay' &&
-    commandValue !== 'import-otel'
+    commandValue !== 'import-otel' &&
+    commandValue !== 'export-otel'
   ) {
     throw new CliUsageError(`Unknown command "${commandValue}".`);
   }
@@ -201,6 +211,9 @@ function parseCommand(argv: readonly string[]): ParsedCommand {
   let foldNoise = true;
   let replayMode: ReplayMode | undefined;
   let outputDirectory: string | undefined;
+  let configFile: string | undefined;
+  let dryRun = false;
+  let resume = false;
   const inputFiles: string[] = [];
 
   for (let index = 1; index < argv.length; index += 1) {
@@ -210,6 +223,20 @@ function parseCommand(argv: readonly string[]): ParsedCommand {
     }
     if (argument === '--json') {
       format = 'json';
+      continue;
+    }
+    if (argument === '--dry-run') {
+      dryRun = true;
+      continue;
+    }
+    if (argument === '--resume') {
+      resume = true;
+      continue;
+    }
+    if (argument === '--config' || argument.startsWith('--config=')) {
+      configFile = argument.startsWith('--config=')
+        ? argument.slice('--config='.length)
+        : readOptionValue(argv, index++, '--config');
       continue;
     }
     if (argument === '--mode' || argument.startsWith('--mode=')) {
@@ -302,7 +329,21 @@ function parseCommand(argv: readonly string[]): ParsedCommand {
   if (commandValue === 'import-otel' && outputDirectory === undefined) {
     throw new CliUsageError('import-otel requires --output <snapshot-directory>.');
   }
-  if (commandValue !== 'import-otel' && directory === undefined) {
+  if (commandValue === 'export-otel') {
+    if (configFile === undefined) {
+      throw new CliUsageError('export-otel requires --config <export-config.json>.');
+    }
+    if (resume && directory !== undefined) {
+      throw new CliUsageError('export-otel --resume does not accept a snapshot directory.');
+    }
+    if (!resume && directory === undefined) {
+      throw new CliUsageError('export-otel requires a snapshot directory or --resume.');
+    }
+    if (resume && dryRun) {
+      throw new CliUsageError('export-otel --resume cannot be combined with --dry-run.');
+    }
+  }
+  if (commandValue !== 'import-otel' && commandValue !== 'export-otel' && directory === undefined) {
     throw new CliUsageError('A snapshot directory is required.');
   }
   if (commandValue === 'replay' && replayMode === undefined) {
@@ -332,13 +373,16 @@ function parseCommand(argv: readonly string[]): ParsedCommand {
   ) {
     throw new CliUsageError('--mode and --output are only supported by replay or import-otel.');
   }
+  if (commandValue !== 'export-otel' && (configFile !== undefined || dryRun || resume)) {
+    throw new CliUsageError('--config, --dry-run, and --resume are only supported by export-otel.');
+  }
   if (minSequence !== undefined && maxSequence !== undefined && minSequence > maxSequence) {
     throw new CliUsageError('--min-sequence cannot be greater than --max-sequence.');
   }
 
   return {
     name: commandValue,
-    directory: resolve(commandValue === 'import-otel' ? outputDirectory! : directory!),
+    directory: resolve(commandValue === 'import-otel' ? outputDirectory! : (directory ?? '.')),
     format,
     graphKind,
     filter: {
@@ -352,7 +396,99 @@ function parseCommand(argv: readonly string[]): ParsedCommand {
     ...(replayMode === undefined ? {} : { replayMode }),
     ...(outputDirectory === undefined ? {} : { outputDirectory: resolve(outputDirectory) }),
     ...(inputFiles.length === 0 ? {} : { inputFiles: inputFiles.map((file) => resolve(file)) }),
+    ...(configFile === undefined ? {} : { configFile: resolve(configFile) }),
+    ...(dryRun ? { dryRun: true } : {}),
+    ...(resume ? { resume: true } : {}),
   };
+}
+
+function asString(value: unknown, name: string, required = true): string | undefined {
+  if (value === undefined && !required) return undefined;
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new CliUsageError(`Export config ${name} must be a non-empty string.`);
+  }
+  return value;
+}
+
+function asOptionalNumber(value: unknown, name: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    throw new CliUsageError(`Export config ${name} must be a non-negative number.`);
+  }
+  return Math.floor(value);
+}
+
+function parseExportConfig(value: unknown): OtelExportConfig {
+  if (!isRecord(value)) throw new CliUsageError('Export config must be a JSON object.');
+  const headersValue = value.headersEnv;
+  let headersEnv: Record<string, string> | undefined;
+  if (headersValue !== undefined) {
+    if (!isRecord(headersValue))
+      throw new CliUsageError('Export config headersEnv must be an object.');
+    headersEnv = {};
+    for (const [header, environment] of Object.entries(headersValue)) {
+      if (typeof environment !== 'string' || environment.trim() === '') {
+        throw new CliUsageError(
+          `Export config headersEnv.${header} must name an environment variable.`,
+        );
+      }
+      headersEnv[header] = environment;
+    }
+  }
+  const contentPolicy = value.contentPolicy;
+  if (
+    contentPolicy !== undefined &&
+    contentPolicy !== 'metadata-only' &&
+    contentPolicy !== 'redacted-content'
+  ) {
+    throw new CliUsageError(
+      'Export config contentPolicy must be metadata-only or redacted-content.',
+    );
+  }
+  const endpoint = asString(value.endpoint, 'endpoint', false);
+  const endpointEnv = asString(value.endpointEnv, 'endpointEnv', false);
+  const queueDir = asString(value.queueDir, 'queueDir', false);
+  const timeoutMs = asOptionalNumber(value.timeoutMs, 'timeoutMs');
+  const batchSpanLimit = asOptionalNumber(value.batchSpanLimit, 'batchSpanLimit');
+  const retryMaxAttempts = asOptionalNumber(value.retryMaxAttempts, 'retryMaxAttempts');
+  const retryBudgetMs = asOptionalNumber(value.retryBudgetMs, 'retryBudgetMs');
+  const queueMaxEntries = asOptionalNumber(value.queueMaxEntries, 'queueMaxEntries');
+  const queueMaxBytes = asOptionalNumber(value.queueMaxBytes, 'queueMaxBytes');
+  const queueRetentionMs = asOptionalNumber(value.queueRetentionMs, 'queueRetentionMs');
+  const config: OtelExportConfig = {
+    targetAlias: asString(value.targetAlias, 'targetAlias')!,
+    serviceName: asString(value.serviceName, 'serviceName')!,
+    ...(endpoint === undefined ? {} : { endpoint }),
+    ...(endpointEnv === undefined ? {} : { endpointEnv }),
+    ...(headersEnv === undefined ? {} : { headersEnv }),
+    ...(contentPolicy === undefined ? {} : { contentPolicy }),
+    ...(queueDir === undefined ? {} : { queueDir: resolve(queueDir) }),
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    ...(batchSpanLimit === undefined ? {} : { batchSpanLimit }),
+    ...(retryMaxAttempts === undefined ? {} : { retryMaxAttempts }),
+    ...(retryBudgetMs === undefined ? {} : { retryBudgetMs }),
+    ...(queueMaxEntries === undefined ? {} : { queueMaxEntries }),
+    ...(queueMaxBytes === undefined ? {} : { queueMaxBytes }),
+    ...(queueRetentionMs === undefined ? {} : { queueRetentionMs }),
+  };
+  if (!isExportEndpointConfigured(config)) {
+    throw new CliUsageError('Export config must specify exactly one of endpoint or endpointEnv.');
+  }
+  if (config.batchSpanLimit !== undefined && config.batchSpanLimit < 1) {
+    throw new CliUsageError('Export config batchSpanLimit must be at least 1.');
+  }
+  return config;
+}
+
+async function loadExportConfig(path: string): Promise<OtelExportConfig> {
+  let value: unknown;
+  try {
+    value = JSON.parse(await readFile(path, 'utf8')) as unknown;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : 'unknown error';
+    throw new CliUsageError(`Could not read export config "${path}": ${detail}`);
+  }
+  return parseExportConfig(value);
 }
 
 function normalizeFile(root: string, file: string | undefined): string | undefined {
@@ -815,6 +951,15 @@ function usage(command?: CommandName): string {
       'Each source trace creates one new snapshot directory; existing snapshots are never overwritten.',
     ].join('\n');
   }
+  if (command === 'export-otel') {
+    return [
+      'Usage: alsnap export-otel <snapshot-directory> --config <export-config.json> [--dry-run] [--json]',
+      '       alsnap export-otel --resume --config <export-config.json> [--json]',
+      '',
+      'Map a local snapshot to filtered OTLP/HTTP JSON and send it through the configured persistent queue.',
+      'Dry-run never resolves credentials, contacts the network, or writes a queue entry.',
+    ].join('\n');
+  }
   return [
     'Agent Loop Snapshot CLI',
     '',
@@ -826,6 +971,7 @@ function usage(command?: CommandName): string {
     '  graph     Export a causal DAG, call tree, or timeline',
     '  replay    Create a mock replay snapshot from recorded results',
     '  import-otel  Import OTLP JSON as observation-only snapshots',
+    '  export-otel  Export a snapshot or resume its configured OTLP queue',
     '',
     'Global options: --help, --version, --json',
   ].join('\n');
@@ -849,7 +995,8 @@ export async function runCli(
       commandValue === 'inspect' ||
       commandValue === 'graph' ||
       commandValue === 'replay' ||
-      commandValue === 'import-otel'
+      commandValue === 'import-otel' ||
+      commandValue === 'export-otel'
         ? commandValue
         : undefined;
     io.stdout(`${usage(command)}\n`);
@@ -927,6 +1074,107 @@ export async function runCli(
         io.stdout(
           `Report: ${String(result.imported_span_count)} imported, ${String(result.rejected_span_count)} rejected, ${String(result.duplicate_span_count)} deduplicated\n`,
         );
+      }
+      return valid ? cliExitCodes.success : cliExitCodes.validationFailed;
+    }
+
+    if (command.name === 'export-otel') {
+      const configFile = command.configFile;
+      if (configFile === undefined) {
+        throw new CliUsageError('export-otel requires --config <export-config.json>.');
+      }
+      const config = await loadExportConfig(configFile);
+      if (command.resume) {
+        if (config.queueDir === undefined) {
+          throw new CliUsageError('export-otel --resume requires queueDir in the export config.');
+        }
+        const flush = await createOtlpExporter(config).flush();
+        const valid =
+          !flush.deadlineExceeded &&
+          flush.pendingCount === 0 &&
+          flush.deliveries.every((delivery) => delivery.state === 'accepted');
+        if (command.format === 'json') {
+          writeJson(io, {
+            command: command.name,
+            resumed: true,
+            target_alias: config.targetAlias,
+            valid,
+            flush,
+          });
+        } else {
+          io.stdout(`${valid ? 'EXPORTED' : 'EXPORT_INCOMPLETE'}\n`);
+          io.stdout(`Target: ${config.targetAlias}\n`);
+          io.stdout(`Pending: ${String(flush.pendingCount)}\n`);
+        }
+        return valid ? cliExitCodes.success : cliExitCodes.validationFailed;
+      }
+
+      const snapshot = await loadTraceSnapshot(command.directory);
+      if (!snapshot.valid || snapshot.manifest === undefined) {
+        const diagnostics = snapshotJsonDiagnostics(command.directory, snapshot);
+        if (command.format === 'json') {
+          writeJson(io, {
+            command: command.name,
+            directory: command.directory,
+            valid: false,
+            diagnostics,
+          });
+        } else {
+          io.stdout('INVALID\n');
+          writeDiagnosticsText(io, diagnostics);
+        }
+        return cliExitCodes.validationFailed;
+      }
+      const exportInput = { manifest: snapshot.manifest, events: snapshot.events };
+      const dryRun = dryRunOtlpExport(exportInput, {
+        ...(config.contentPolicy === undefined ? {} : { contentPolicy: config.contentPolicy }),
+        serviceName: config.serviceName,
+        targetAlias: config.targetAlias,
+      });
+      if (command.dryRun) {
+        if (command.format === 'json') {
+          writeJson(io, {
+            command: command.name,
+            directory: command.directory,
+            dry_run: true,
+            target_alias: config.targetAlias,
+            delivery: dryRun.delivery,
+            mapping: dryRun.mapping.report,
+          });
+        } else {
+          io.stdout('DRY_RUN\n');
+          io.stdout(`Target: ${config.targetAlias}\n`);
+          io.stdout(`Spans: ${String(dryRun.mapping.report.spanCount)}\n`);
+          io.stdout(`Dropped fields: ${String(dryRun.mapping.report.droppedFieldCount)}\n`);
+        }
+        return cliExitCodes.success;
+      }
+      if (config.queueDir === undefined) {
+        throw new CliUsageError('export-otel requires queueDir in the export config.');
+      }
+      const exporter = createOtlpExporter(config);
+      const queued = await exporter.exportSnapshot(exportInput);
+      const flush = await exporter.flush();
+      const valid =
+        queued.state === 'queued' &&
+        !flush.deadlineExceeded &&
+        flush.pendingCount === 0 &&
+        flush.deliveries.length > 0 &&
+        flush.deliveries.every((delivery) => delivery.state === 'accepted');
+      if (command.format === 'json') {
+        writeJson(io, {
+          command: command.name,
+          directory: command.directory,
+          target_alias: config.targetAlias,
+          valid,
+          queued,
+          flush,
+          mapping: dryRun.mapping.report,
+        });
+      } else {
+        io.stdout(`${valid ? 'EXPORTED' : 'EXPORT_INCOMPLETE'}\n`);
+        io.stdout(`Target: ${config.targetAlias}\n`);
+        io.stdout(`Pending: ${String(flush.pendingCount)}\n`);
       }
       return valid ? cliExitCodes.success : cliExitCodes.validationFailed;
     }

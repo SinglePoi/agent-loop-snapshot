@@ -5,6 +5,6 @@
     "outDir": "dist",
     "tsBuildInfoFile": "dist/tsconfig.tsbuildinfo"
   },
-  "references": [{ "path": "../schema" }, { "path": "../recorder" }],
+  "references": [{ "path": "../schema" }, { "path": "../recorder" }, { "path": "../otel-export" }],
   "include": ["src"]
 }

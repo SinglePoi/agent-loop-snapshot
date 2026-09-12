@@ -1,6 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -51,6 +52,89 @@ test('validate emits stable JSON and succeeds for the golden snapshot', async ()
     valid: true,
     diagnostics: [],
   });
+});
+
+test('export-otel dry-run maps a valid snapshot without queueing or contacting a target', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'alsnap-export-config-'));
+  const config = join(root, 'export.json');
+  try {
+    await writeFile(
+      config,
+      JSON.stringify({
+        targetAlias: 'fixture',
+        endpoint: 'http://127.0.0.1:4318/v1/traces',
+        serviceName: 'cli-fixture',
+      }),
+    );
+    const captured = captureIo();
+    const exitCode = await runCli(
+      ['export-otel', fixtureDirectory, '--config', config, '--dry-run', '--json'],
+      captured.io,
+    );
+    assert.equal(exitCode, cliExitCodes.success);
+    const output = JSON.parse(captured.stdout.join('')) as {
+      command: string;
+      dry_run: boolean;
+      target_alias: string;
+      delivery: { state: string; attempted: boolean };
+    };
+    assert.equal(output.command, 'export-otel');
+    assert.equal(output.dry_run, true);
+    assert.equal(output.target_alias, 'fixture');
+    assert.equal(output.delivery.state, 'dry_run');
+    assert.equal(output.delivery.attempted, false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('export-otel sends a local snapshot through its configured queue', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'alsnap-export-cli-'));
+  const server = createServer((request, response) => {
+    request.resume();
+    response.setHeader('content-type', 'application/json');
+    response.end('{}');
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  assert.ok(address !== null && typeof address !== 'string');
+  try {
+    const config = join(root, 'export.json');
+    await writeFile(
+      config,
+      JSON.stringify({
+        targetAlias: 'fixture',
+        endpoint: `http://127.0.0.1:${String(address.port)}/v1/traces`,
+        serviceName: 'cli-fixture',
+        queueDir: join(root, 'queue'),
+      }),
+    );
+    const captured = captureIo();
+    const exitCode = await runCli(
+      ['export-otel', fixtureDirectory, '--config', config, '--json'],
+      captured.io,
+    );
+    assert.equal(exitCode, cliExitCodes.success);
+    const output = JSON.parse(captured.stdout.join('')) as {
+      valid: boolean;
+      queued: { state: string };
+      flush: { pendingCount: number; deliveries: Array<{ state: string }> };
+    };
+    assert.equal(output.valid, true);
+    assert.equal(output.queued.state, 'queued');
+    assert.equal(output.flush.pendingCount, 0);
+    assert.ok(output.flush.deliveries.length > 0);
+    assert.ok(output.flush.deliveries.every((delivery) => delivery.state === 'accepted'));
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('validate returns exit code 2 and structured diagnostics for an invalid snapshot', async () => {

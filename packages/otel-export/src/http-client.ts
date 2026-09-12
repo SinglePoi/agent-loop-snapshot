@@ -114,6 +114,7 @@ async function responseText(response: Response): Promise<string> {
 }
 
 function parseSuccessResponse(text: string): PartialSuccess | undefined | 'invalid' {
+  if (text.trim() === '') return undefined;
   try {
     return partialSuccess(JSON.parse(text) as unknown);
   } catch {
@@ -251,6 +252,12 @@ export function createOtlpHttpClient(
               });
             }
             if (parsed !== undefined) {
+              if (parsed.rejectedSpans === 0) {
+                return report('accepted', config.targetAlias, spanCount, attempts, {
+                  accepted: spanCount,
+                  rejected: 0,
+                });
+              }
               return report('rejected', config.targetAlias, spanCount, attempts, {
                 accepted: Math.max(0, spanCount - parsed.rejectedSpans),
                 rejected: parsed.rejectedSpans,
