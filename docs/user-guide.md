@@ -4,7 +4,7 @@
 
 This guide is for users who want to record, inspect, import, or export Agent runs. It covers both npm installation and source development: install only the CLI, or add SDK packages as needed.
 
-The current public release is `0.1.1`, published to the official npm registry: <https://registry.npmjs.org/>. All packages use the `@agent-loop-snapshot` scope, and the CLI command is `alsnap`. Each package's npm page also includes a package-level README.
+The current public release is `0.1.2`, published to the official npm registry: <https://registry.npmjs.org/>. All packages use the `@agent-loop-snapshot` scope, and the CLI command is `alsnap`. Each package's npm page also includes a package-level README.
 
 ## 1. Set up your environment
 
@@ -50,7 +50,7 @@ Other public packages can be selected by capability:
 | Mock, Verified, and Semantic Replay | `@agent-loop-snapshot/replay` |
 | OTLP JSON import/export | `@agent-loop-snapshot/otel-import`, `@agent-loop-snapshot/otel-export` |
 
-To pin the current public version, append `@0.1.1` to a package name, for example `npm install @agent-loop-snapshot/cli@0.1.1`. Future releases follow Semantic Versioning and will document compatibility in the changelog.
+To pin the current public version, append `@0.1.2` to a package name, for example `npm install @agent-loop-snapshot/cli@0.1.2`. Future releases follow Semantic Versioning and will document compatibility in the changelog.
 
 ### Develop from source
 

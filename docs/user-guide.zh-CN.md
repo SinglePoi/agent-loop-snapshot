@@ -4,7 +4,7 @@
 
 本手册面向希望记录、查看、导入或导出 Agent 运行过程的使用者。它同时覆盖 npm 安装与源码开发：你可以只安装 CLI，也可以按需要安装 SDK 包。
 
-当前公开版本为 `0.1.1`，发布在 npm 官方 registry：<https://registry.npmjs.org/>。所有包都使用 `@agent-loop-snapshot` scope；CLI 命令名为 `alsnap`。每个包的 npm 页面还提供对应的包级 README。
+当前公开版本为 `0.1.2`，发布在 npm 官方 registry：<https://registry.npmjs.org/>。所有包都使用 `@agent-loop-snapshot` scope；CLI 命令名为 `alsnap`。每个包的 npm 页面还提供对应的包级 README。
 
 ## 1. 准备环境
 
@@ -50,7 +50,7 @@ npm install @agent-loop-snapshot/instrumentation-openai @agent-loop-snapshot/ins
 | Mock、Verified、Semantic Replay | `@agent-loop-snapshot/replay` |
 | OTLP JSON 导入/导出 | `@agent-loop-snapshot/otel-import`、`@agent-loop-snapshot/otel-export` |
 
-需要固定当前公开版本时，在包名后加 `@0.1.1`，例如 `npm install @agent-loop-snapshot/cli@0.1.1`。后续版本遵循语义化版本，并会在变更日志中说明兼容性。
+需要固定当前公开版本时，在包名后加 `@0.1.2`，例如 `npm install @agent-loop-snapshot/cli@0.1.2`。后续版本遵循语义化版本，并会在变更日志中说明兼容性。
 
 ### 从源码开发
 
