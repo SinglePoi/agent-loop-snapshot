@@ -2,9 +2,11 @@
 
 本手册面向希望记录、查看、导入或导出 Agent 运行过程的使用者。它同时覆盖 npm 安装与源码开发：你可以只安装 CLI，也可以按需要安装 SDK 包。
 
+当前公开版本为 `0.1.0`，发布在 npm 官方 registry：<https://registry.npmjs.org/>。所有包都使用 `@agent-loop-snapshot` scope；CLI 命令名为 `alsnap`。
+
 ## 1. 准备环境
 
-需要 Node.js `24.20.x` 或兼容的 Node.js 24 版本。若只使用 CLI，不需要 pnpm。
+需要 Node.js `24.20.x`（`>=24.20.0 <25`）。若只使用 CLI，不需要 pnpm。
 
 ### 安装 CLI
 
@@ -34,6 +36,19 @@ npm install @agent-loop-snapshot/instrumentation-openai @agent-loop-snapshot/ins
 ```
 
 `@agent-loop-snapshot/instrumentation` 会自动安装它所需的核心依赖。除非直接使用底层 API，否则不需要单独安装 `schema`、`recorder`、`trace`、`graph` 或 `replay`。
+
+按功能选择其他公开包：
+
+| 功能 | 包 |
+| --- | --- |
+| 快照协议与校验 | `@agent-loop-snapshot/schema` |
+| 记录运行与持久化 | `@agent-loop-snapshot/recorder` |
+| Trace 读取与索引 | `@agent-loop-snapshot/trace` |
+| DAG、调用树和时间线 | `@agent-loop-snapshot/graph` |
+| Mock、Verified、Semantic Replay | `@agent-loop-snapshot/replay` |
+| OTLP JSON 导入/导出 | `@agent-loop-snapshot/otel-import`、`@agent-loop-snapshot/otel-export` |
+
+需要固定首个公开版本时，在包名后加 `@0.1.0`，例如 `npm install @agent-loop-snapshot/cli@0.1.0`。后续版本遵循语义化版本，并会在变更日志中说明兼容性。
 
 ### 从源码开发
 
@@ -241,7 +256,7 @@ docker pull otel/opentelemetry-collector-contrib:0.114.0
 先运行 dry-run，检查 endpoint、配置与脱敏后的映射：
 
 ```powershell
-pnpm alsnap -- export-otel ./runs/run-123 --config ./export.json --dry-run --json
+npx alsnap export-otel ./runs/run-123 --config ./export.json --dry-run --json
 ```
 
 随后检查环境变量是否已设置、Collector 是否监听 `/v1/traces`，并使用 `--resume` 续传已入队批次。导出失败不会重跑原始 Agent 业务。
