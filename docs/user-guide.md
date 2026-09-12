@@ -1,73 +1,73 @@
-# Agent Loop Snapshot 用户使用手册
+# Agent Loop Snapshot User Guide
 
-[English](user-guide.en.md)
+[简体中文](user-guide.zh-CN.md)
 
-本手册面向希望记录、查看、导入或导出 Agent 运行过程的使用者。它同时覆盖 npm 安装与源码开发：你可以只安装 CLI，也可以按需要安装 SDK 包。
+This guide is for users who want to record, inspect, import, or export Agent runs. It covers both npm installation and source development: install only the CLI, or add SDK packages as needed.
 
-当前公开版本为 `0.1.1`，发布在 npm 官方 registry：<https://registry.npmjs.org/>。所有包都使用 `@agent-loop-snapshot` scope；CLI 命令名为 `alsnap`。每个包的 npm 页面还提供对应的包级 README。
+The current public release is `0.1.1`, published to the official npm registry: <https://registry.npmjs.org/>. All packages use the `@agent-loop-snapshot` scope, and the CLI command is `alsnap`. Each package's npm page also includes a package-level README.
 
-## 1. 准备环境
+## 1. Set up your environment
 
-需要 Node.js `24.20.x`（`>=24.20.0 <25`）。若只使用 CLI，不需要 pnpm。
+Node.js `24.20.x` is required (`>=24.20.0 <25`). pnpm is not required when using only the CLI.
 
-### 安装 CLI
+### Install the CLI
 
-在自己的项目中安装：
+Install it in your project:
 
 ```powershell
 npm install --save-dev @agent-loop-snapshot/cli
 ```
 
-随后用 `npx alsnap <命令>` 执行，例如：
+Then run commands with `npx alsnap <command>`, for example:
 
 ```powershell
 npx alsnap validate ./runs/run-123
 npx alsnap inspect ./runs/run-123 --json
 ```
 
-### 安装 SDK
+### Install the SDK packages
 
-按实际使用场景安装所需包：
+Install the packages for your use case:
 
 ```powershell
-# 为自定义模型和工具函数记录运行过程
+# Record custom model and tool functions
 npm install @agent-loop-snapshot/instrumentation
 
-# 为既有 OpenAI / Anthropic SDK 调用自动采集
+# Automatically capture existing OpenAI / Anthropic SDK calls
 npm install @agent-loop-snapshot/instrumentation-openai @agent-loop-snapshot/instrumentation-anthropic
 ```
 
-`@agent-loop-snapshot/instrumentation` 会自动安装它所需的核心依赖。除非直接使用底层 API，否则不需要单独安装 `schema`、`recorder`、`trace`、`graph` 或 `replay`。
+`@agent-loop-snapshot/instrumentation` installs the core dependencies it needs. You do not need to install `schema`, `recorder`, `trace`, `graph`, or `replay` separately unless you use their lower-level APIs directly.
 
-按功能选择其他公开包：
+Other public packages can be selected by capability:
 
-| 功能 | 包 |
+| Capability | Package |
 | --- | --- |
-| 快照协议与校验 | `@agent-loop-snapshot/schema` |
-| 记录运行与持久化 | `@agent-loop-snapshot/recorder` |
-| Trace 读取与索引 | `@agent-loop-snapshot/trace` |
-| DAG、调用树和时间线 | `@agent-loop-snapshot/graph` |
-| Mock、Verified、Semantic Replay | `@agent-loop-snapshot/replay` |
-| OTLP JSON 导入/导出 | `@agent-loop-snapshot/otel-import`、`@agent-loop-snapshot/otel-export` |
+| Snapshot protocol and validation | `@agent-loop-snapshot/schema` |
+| Run recording and persistence | `@agent-loop-snapshot/recorder` |
+| Trace loading and indexing | `@agent-loop-snapshot/trace` |
+| DAGs, call trees, and timelines | `@agent-loop-snapshot/graph` |
+| Mock, Verified, and Semantic Replay | `@agent-loop-snapshot/replay` |
+| OTLP JSON import/export | `@agent-loop-snapshot/otel-import`, `@agent-loop-snapshot/otel-export` |
 
-需要固定当前公开版本时，在包名后加 `@0.1.1`，例如 `npm install @agent-loop-snapshot/cli@0.1.1`。后续版本遵循语义化版本，并会在变更日志中说明兼容性。
+To pin the current public version, append `@0.1.1` to a package name, for example `npm install @agent-loop-snapshot/cli@0.1.1`. Future releases follow Semantic Versioning and will document compatibility in the changelog.
 
-### 从源码开发
+### Develop from source
 
-仓库开发需要 Node.js `24.20.x` 与 pnpm `11.19.x`。在仓库根目录安装依赖并完成离线检查：
+Repository development requires Node.js `24.20.x` and pnpm `11.19.x`. Install dependencies and run the offline checks from the repository root:
 
 ```powershell
 pnpm install
 pnpm run check
 ```
 
-`pnpm run check` 不需要 API key、Docker 或外网模型服务。它会构建项目、运行单元测试和三个离线示例。
+`pnpm run check` does not require an API key, Docker, or an external model service. It builds the project, runs unit tests, and runs the three offline examples.
 
-以下命令示例均使用已安装 CLI 的 `npx alsnap`。在本仓库源码目录开发时，可等价改为 `pnpm alsnap -- <命令>`。所有快照目录均应使用新的、尚不存在的输出目录，避免覆盖已有运行记录。
+The examples below use the installed CLI as `npx alsnap`. When developing in this source repository, you can use `pnpm alsnap -- <command>` instead. Always use new, non-existent output directories for snapshots so existing run records are not overwritten.
 
-## 2. 先体验：运行离线示例
+## 2. Try it first: run the offline examples
 
-先构建一次，再选择一个入口执行：
+Build once, then choose an entry point:
 
 ```powershell
 pnpm build
@@ -76,17 +76,17 @@ node examples/sdk-instrumentation/demo.mjs
 npx alsnap import-otel examples/otel-import/trace.json --output ./runs/otel-import --json
 ```
 
-也可以一次运行全部示例：
+Run all examples together:
 
 ```powershell
 pnpm run examples:check
 ```
 
-示例会在临时或指定的 `runs` 目录生成快照。对应的前置条件和输出说明参见各示例目录的 README。
+The examples create snapshots in a temporary or configured `runs` directory. See the README in each example directory for prerequisites and output details.
 
-## 3. 记录自己的函数、模型和工具
+## 3. Record your own functions, model, and tools
 
-如果模型调用与工具调用都是你自己提供的 Promise 函数，使用 `instrument()`。每个工具必须声明副作用等级；`read_only` 表示只读，可能写入外部系统的工具应使用更严格的等级。
+If your model and tools are Promise-based functions provided by your application, use `instrument()`. Every tool must declare a side-effect level; use `read_only` for read-only operations and a stricter level for tools that may write to an external system.
 
 ```ts
 import { instrument } from '@agent-loop-snapshot/instrumentation';
@@ -107,9 +107,9 @@ const agent = instrument({
 });
 
 const answer = await agent.run(
-  { input: { goal: '查资料并总结' } },
+  { input: { goal: 'Research and summarize' } },
   async ({ model, tools, checkpoint }) => {
-    const query = await model.call('生成检索词');
+    const query = await model.call('Generate a search query');
     const documents = await tools.search(query);
     await checkpoint({ query, documents });
     return model.call(JSON.stringify(documents));
@@ -117,13 +117,13 @@ const answer = await agent.run(
 );
 ```
 
-调用结果和原始业务错误会保持原样。默认的 `strict` 记录模式下，如果记录本身发生故障，业务调用可能被阻止或抛出记录错误；这适用于你需要把可审计记录作为前提的场景。
+Call results and original business errors are preserved. In the default `strict` recording mode, a recording failure may prevent the business call or throw a recording error; this is appropriate when an auditable record is a prerequisite for execution.
 
-`checkpoint()` 只保存你明确传入的全量状态。只有最后记录动作是 checkpoint 的原生快照，才可能具备后续恢复所需的状态 hash；不要把普通模型返回值当作可恢复状态。
+`checkpoint()` stores only the complete state explicitly supplied by the caller. A native snapshot may support later recovery only when its last recording action is a checkpoint. Do not treat an ordinary model response as recoverable state.
 
-## 4. 自动记录 OpenAI 或 Anthropic SDK
+## 4. Automatically record OpenAI or Anthropic SDK calls
 
-如果业务代码已直接调用 OpenAI 或 Anthropic SDK，在加载业务模块之前初始化自动集成，再用 `telemetry.run()` 包住一次业务运行：
+When application code calls the OpenAI or Anthropic SDK directly, initialize the integration before loading application modules and wrap one application run with `telemetry.run()`:
 
 ```ts
 import { initInstrumentation } from '@agent-loop-snapshot/instrumentation';
@@ -140,50 +140,50 @@ const telemetry = initInstrumentation({
 
 const { main } = await import('./app.js');
 try {
-  await telemetry.run({ input: { goal: '完成任务' } }, () => main());
+  await telemetry.run({ input: { goal: 'Complete the task' } }, () => main());
 } finally {
   await telemetry.shutdown();
 }
 ```
 
-当前固定支持 OpenAI `7.15.0` 的 Chat Completions / Responses，以及 Anthropic `0.125.0` 的 Messages；支持其 `create()` 非流式调用与 `stream: true` 异步迭代。流必须由业务代码实际迭代，采集器不会预读。
+The fixed support matrix currently covers OpenAI `7.15.0` Chat Completions and Responses, and Anthropic `0.125.0` Messages. Both support non-streaming `create()` calls and `stream: true` async iteration. A stream must be actually iterated by application code; the instrumentation does not read ahead.
 
-自动采集默认为 `best-effort`：采集失败会产生诊断，但不会替换 SDK 的结果或业务错误。它只记录 `telemetry.run()` 作用域内的调用；已在初始化前加载的 SDK、打包器静态内联的 SDK 及 Azure、Bedrock、Vertex 专用客户端不在当前支持范围内。
+SDK instrumentation is best-effort: capture failures produce diagnostics without replacing the SDK result or business error. It records only calls inside the `telemetry.run()` scope. SDKs loaded before initialization, SDKs statically inlined by a bundler, and Azure, Bedrock, or Vertex-specific clients are outside the current support scope.
 
-## 5. 查看、校验和绘图
+## 5. Inspect, validate, and graph a snapshot
 
-假设快照位于 `./runs/run-123`，可使用以下命令：
+Assuming the snapshot is at `./runs/run-123`:
 
 ```powershell
-# 校验目录、事件与 artifact 引用
+# Validate the directory, events, and artifact references
 npx alsnap validate ./runs/run-123
 
-# 查看不包含 payload 的运行摘要
+# Inspect a run summary without payloads
 npx alsnap inspect ./runs/run-123
 
-# 输出 Mermaid 因果图
+# Output a Mermaid causal graph
 npx alsnap graph ./runs/run-123 --format mermaid
 
-# 输出 JSON 时间线
+# Output a JSON timeline
 npx alsnap graph ./runs/run-123 --kind timeline --format json
 ```
 
-需要让脚本读取结果时，加上 `--json`。退出码 `0` 表示成功，`2` 表示快照无效、没有有效导入 trace，或导出未被完全接受，`1` 表示命令参数或运行错误。
+Add `--json` when a script needs to consume the result. Exit code `0` means success, `2` means the snapshot is invalid, no valid trace was imported, or an export was not fully accepted, and `1` means a command or runtime error.
 
-## 6. 导入已有 OTLP JSON Trace
+## 6. Import an existing OTLP JSON trace
 
-导入仅接受 OTLP/HTTP JSON 的 `ExportTraceServiceRequest`（包含 `resourceSpans`），不接受 protobuf、gRPC、控制台文本或厂商 UI 导出文件：
+Import accepts only OTLP/HTTP JSON `ExportTraceServiceRequest` files containing `resourceSpans`. It does not accept protobuf, gRPC, console text, or vendor UI export files:
 
 ```powershell
 npx alsnap import-otel trace-a.json trace-b.json --output ./imported-runs --json
 npx alsnap inspect ./imported-runs/run_<generated-id> --json
 ```
 
-每个输入文件最多 64 MiB。导入结果是 `otel-import` 观察快照：可以 `validate`、`inspect` 和 `graph`，但不能 replay、resume 或编译为可执行 Workflow。导入也不会自动向外部发送数据。
+Each input file is limited to 64 MiB. The result is an `otel-import` observation snapshot: it can be validated, inspected, and graphed, but cannot be replayed, resumed, or compiled into an executable Workflow. Import never sends data to an external system automatically.
 
-## 7. 导出到 OpenTelemetry Collector 或外部平台
+## 7. Export to an OpenTelemetry Collector or external platform
 
-导出默认只发送流程元数据，不发送模型输入输出、工具参数结果、checkpoint、artifact 内容、异常正文或本地路径。先创建配置文件，例如 `export.json`：
+Export sends workflow metadata by default. It does not send model inputs or outputs, tool arguments or results, checkpoints, artifact contents, exception bodies, or local paths. Create a configuration file such as `export.json`:
 
 ```json
 {
@@ -200,81 +200,81 @@ npx alsnap inspect ./imported-runs/run_<generated-id> --json
 }
 ```
 
-设置 endpoint 后，先 dry-run，再实际发送：
+Set the endpoint, run a dry-run first, and then send:
 
 ```powershell
 $env:OTLP_TRACES_ENDPOINT = 'http://127.0.0.1:4318/v1/traces'
 
-# 显示映射和过滤结果；不会联网、入队或读取凭据
+# Show mapping and filtering results; no network, queue, or credentials are used
 npx alsnap export-otel ./runs/run-123 --config ./export.json --dry-run --json
 
-# 发送；网络短暂不可用时会保留本地队列
+# Send; a temporary network failure leaves the local queue intact
 npx alsnap export-otel ./runs/run-123 --config ./export.json --json
 
-# 稍后仅续传相同配置指纹的本地队列
+# Later, resume only queued batches with the same configuration fingerprint
 npx alsnap export-otel --resume --config ./export.json --json
 ```
 
-`endpoint` 与 `endpointEnv` 必须二选一。生产目标应使用 HTTPS；仅 `localhost`、`127.0.0.1` 与 `::1` 可使用 HTTP。认证信息只放在环境变量中，并通过 `headersEnv` 写入“HTTP header 名 → 环境变量名”的映射，例如：
+`endpoint` and `endpointEnv` are mutually exclusive. Production targets should use HTTPS; HTTP is allowed only for `localhost`, `127.0.0.1`, and `::1`. Keep authentication values in environment variables and map HTTP header names to environment variable names with `headersEnv`, for example:
 
 ```json
 "headersEnv": { "Authorization": "OTLP_AUTHORIZATION" }
 ```
 
-不要把 token、API key、完整 Authorization 值写进 JSON、命令行、快照或 Git 仓库。
+Do not put tokens, API keys, or complete Authorization values in JSON, command lines, snapshots, or the Git repository.
 
-Langtrace 与 Grafana Cloud 的配置边界、Collector 转发方式及兼容矩阵见 [OTLP/HTTP 导出与平台接入](otel-export.md)。
+See [OTLP export and platform integration](otel-export.md) for Langtrace and Grafana Cloud boundaries, Collector forwarding, and the compatibility matrix.
 
-## 8. 是否需要 Docker？
+## 8. Do you need Docker?
 
-日常记录、查看、OTLP JSON 导入、离线测试和导出到已有 endpoint 都不需要 Docker。
+Daily recording, inspection, OTLP JSON import, offline tests, and export to an existing endpoint do not require Docker.
 
-只有以下两种情况需要 Docker Desktop 已启动：
+Docker Desktop must be running only when you want to:
 
-- 想在本机启动仓库提供的 OpenTelemetry Collector；
-- 想执行真实 Collector 端到端验收：
+- Start the OpenTelemetry Collector supplied by the repository.
+- Run the real Collector end-to-end verification:
 
 ```powershell
 pnpm run collector:verify
 ```
 
-该命令会拉取并运行固定镜像 `otel/opentelemetry-collector-contrib:0.114.0`。若镜像下载报 Docker Hub 网络、代理或 TLS 错误，先确认 Docker Desktop 的 daemon 正在运行，并检查其网络/代理配置；这不是 TypeScript 代码构建失败。
+This command pulls and runs the pinned image `otel/opentelemetry-collector-contrib:0.114.0`. If image download fails because of Docker Hub networking, proxy, or TLS issues, check that the Docker Desktop daemon is running and review its network or proxy configuration. This is separate from a TypeScript build failure.
 
-## 9. 常见问题
+## 9. Troubleshooting
 
-### `pnpm run collector:verify` 失败
+### `pnpm run collector:verify` fails
 
-先确认 Docker 可用：
+First confirm that Docker is available:
 
 ```powershell
 docker version
 docker pull otel/opentelemetry-collector-contrib:0.114.0
 ```
 
-如果 pull 出现 `EOF`、超时或无法访问 `registry-1.docker.io`，处理 Docker Desktop 的网络、代理或镜像加速设置后重试。镜像成功拉取后再执行 `pnpm run collector:verify`。
+If pull reports `EOF`, a timeout, or an inability to reach `registry-1.docker.io`, fix Docker Desktop's network, proxy, or registry mirror settings and retry. Then run `pnpm run collector:verify` again.
 
-### 导出返回非零退出码
+### Export returns a non-zero exit code
 
-先运行 dry-run，检查 endpoint、配置与脱敏后的映射：
+Run a dry-run first to inspect the endpoint, configuration, and redacted mapping:
 
 ```powershell
 npx alsnap export-otel ./runs/run-123 --config ./export.json --dry-run --json
 ```
 
-随后检查环境变量是否已设置、Collector 是否监听 `/v1/traces`，并使用 `--resume` 续传已入队批次。导出失败不会重跑原始 Agent 业务。
+Then check that the environment variables are set, the Collector is listening on `/v1/traces`, and use `--resume` for queued batches. An export failure does not rerun the original Agent business logic.
 
-### 为什么快照不能 replay 或 resume？
+### Why can't the snapshot be replayed or resumed?
 
-SDK 自动采集与 OTLP 导入通常只保存观察信息，或没有可验证的最终状态，因此会被安全门禁标记为不可执行。使用 `inspect` 查看快照的来源、完整度和限制原因；需要恢复执行时，应在通用函数包装运行中明确写入可恢复的 checkpoint，并重新获得当前环境所需的权限。
+SDK instrumentation and OTLP import usually capture observations only, or do not contain a verifiable final state. The safety gate therefore marks them as non-executable. Use `inspect` to view the snapshot source, completeness, and restriction reason. For recovery, write an explicit recoverable checkpoint during a generic function-instrumented run and obtain the permissions required by the current environment again.
 
-## 10. 发布前自检
+## 10. Pre-release checks
 
-修改项目后，可按以下顺序检查：
+After making changes, run these checks in order:
 
 ```powershell
 pnpm run check
-pnpm run collector:verify  # 可选；需要 Docker
+pnpm run collector:verify  # Optional; requires Docker
 pnpm run release:verify
 ```
 
-`release:verify` 会执行常规质量门禁、各包打包检查和 tarball 消费者验证；它不替代需要 Docker 的 Collector 验证。
+`release:verify` runs the normal quality gate, package checks, and a tarball consumer verification. It does not replace the Collector verification, which requires Docker.
