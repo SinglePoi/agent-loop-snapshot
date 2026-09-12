@@ -1,5 +1,7 @@
 # Agent Loop Snapshot 用户使用手册
 
+[English](user-guide.en.md)
+
 本手册面向希望记录、查看、导入或导出 Agent 运行过程的使用者。它同时覆盖 npm 安装与源码开发：你可以只安装 CLI，也可以按需要安装 SDK 包。
 
 当前公开版本为 `0.1.1`，发布在 npm 官方 registry：<https://registry.npmjs.org/>。所有包都使用 `@agent-loop-snapshot` scope；CLI 命令名为 `alsnap`。每个包的 npm 页面还提供对应的包级 README。
