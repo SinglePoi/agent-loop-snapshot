@@ -9,6 +9,7 @@
   ],
   "type": "module",
   "dependencies": {
+    "@agent-loop-snapshot/otel-export": "workspace:*",
     "@agent-loop-snapshot/recorder": "workspace:*",
     "@agent-loop-snapshot/schema": "workspace:*"
   },

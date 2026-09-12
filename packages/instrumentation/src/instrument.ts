@@ -20,6 +20,7 @@ import type {
   SideEffectLevel,
   SnapshotManifest,
 } from '@agent-loop-snapshot/schema';
+import type { ExporterFlushReport, OtlpExporter } from '@agent-loop-snapshot/otel-export';
 
 import {
   currentInstrumentationScope,
@@ -92,6 +93,8 @@ export interface InstrumentOptions<
   readonly redaction?: RedactionPipelineOptions;
   readonly maxRecordBytes?: number;
   readonly drainTimeoutMs?: number;
+  /** Exporters receive each committed root snapshot asynchronously. */
+  readonly exporters?: readonly OtlpExporter[];
   readonly onSnapshot?: (snapshot: InstrumentSnapshot) => void | Promise<void>;
   readonly onDiagnostic?: (diagnostic: InstrumentationDiagnostic) => void;
 }
@@ -104,6 +107,8 @@ export interface InstrumentedAgent<
     options: { readonly input: TInput },
     operation: (context: InstrumentRunContext<TModel, TTools>) => TResult | Promise<TResult>,
   ): Promise<TResult>;
+  flushExporters(options?: { readonly deadlineMs?: number }): Promise<void>;
+  shutdown(options?: { readonly deadlineMs?: number }): Promise<void>;
 }
 
 interface GenericRun extends InstrumentationRun {
@@ -199,6 +204,21 @@ function errorInfo(error: unknown, code: string, kind: ErrorInfo['kind']): Error
   };
 }
 
+function incompleteExportMessage(
+  action: 'flush' | 'shutdown',
+  report: ExporterFlushReport,
+): string | undefined {
+  const incomplete = report.deliveries.find((delivery) => delivery.state !== 'accepted');
+  if (incomplete !== undefined) {
+    return `OTLP export ${action} did not complete: ${incomplete.message ?? incomplete.state}.`;
+  }
+  if (report.deadlineExceeded) return `OTLP export ${action} exceeded its deadline.`;
+  if (report.pendingCount > 0) {
+    return `OTLP export ${action} left ${String(report.pendingCount)} batch(es) queued.`;
+  }
+  return undefined;
+}
+
 class Agent<
   TModel extends ModelDefinition<AsyncFunction>,
   TTools extends ToolDefinitions,
@@ -209,6 +229,8 @@ class Agent<
   private readonly redaction: RedactionPipelineOptions;
   private readonly onSnapshot: ((snapshot: InstrumentSnapshot) => void | Promise<void>) | undefined;
   private readonly onDiagnostic: ((diagnostic: InstrumentationDiagnostic) => void) | undefined;
+  private readonly exporters: readonly OtlpExporter[];
+  private closed = false;
 
   constructor(private readonly options: InstrumentOptions<TModel, TTools>) {
     this.snapshotDir = resolve(options.snapshotDir);
@@ -217,12 +239,19 @@ class Agent<
     this.redaction = options.redaction ?? {};
     this.onSnapshot = options.onSnapshot;
     this.onDiagnostic = options.onDiagnostic;
+    this.exporters = [...new Set(options.exporters ?? [])];
   }
 
   async run<TInput extends JsonValue, TResult>(
     options: { readonly input: TInput },
     operation: (context: InstrumentRunContext<TModel, TTools>) => TResult | Promise<TResult>,
   ): Promise<TResult> {
+    if (this.closed) {
+      throw new InstrumentationError(
+        'INSTRUMENTATION_SHUTDOWN',
+        'Instrumentation has been shut down; it cannot start another run.',
+      );
+    }
     const existingScope = currentInstrumentationScope();
     if (existingScope?.generic === true) {
       throw new InstrumentationError(
@@ -264,7 +293,7 @@ class Agent<
 
     const drained = await this.drain(active, true);
     active.acceptingCalls = false;
-    if (!drained) {
+    if (!drained && active.run.status === 'running') {
       active.recorder.markIncomplete(active.run, {
         code: 'drain_timed_out',
         message: `Wrapped calls did not settle within ${this.drainTimeoutMs}ms.`,
@@ -301,6 +330,7 @@ class Agent<
         });
       }
       await active.writer.commit(active.recorder.getManifest(active.run));
+      this.scheduleExport(active);
     } catch (recordingError) {
       this.report({
         code: 'RECORDING_FINALIZATION_FAILED',
@@ -337,6 +367,42 @@ class Agent<
     return result as TResult;
   }
 
+  async flushExporters(options: { readonly deadlineMs?: number } = {}): Promise<void> {
+    await Promise.all(
+      this.exporters.map(async (exporter) => {
+        try {
+          const report = await exporter.flush(options);
+          const incomplete = incompleteExportMessage('flush', report);
+          if (incomplete !== undefined) this.report({ code: 'EXPORT_FAILED', message: incomplete });
+        } catch (error) {
+          this.report({
+            code: 'EXPORT_FAILED',
+            message: `Could not flush OTLP export: ${message(error)}`,
+          });
+        }
+      }),
+    );
+  }
+
+  async shutdown(options: { readonly deadlineMs?: number } = {}): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+    await Promise.all(
+      this.exporters.map(async (exporter) => {
+        try {
+          const report = await exporter.shutdown(options);
+          const incomplete = incompleteExportMessage('shutdown', report);
+          if (incomplete !== undefined) this.report({ code: 'EXPORT_FAILED', message: incomplete });
+        } catch (error) {
+          this.report({
+            code: 'EXPORT_FAILED',
+            message: `Could not shut down OTLP export: ${message(error)}`,
+          });
+        }
+      }),
+    );
+  }
+
   private async runJoined<TResult>(
     scope: InstrumentationScope,
     operation: (context: InstrumentRunContext<TModel, TTools>) => TResult | Promise<TResult>,
@@ -369,13 +435,13 @@ class Agent<
 
     const drained = await this.drain(active);
     active.acceptingCalls = false;
-    if (!drained) {
+    if (!drained && active.run.status === 'running') {
       active.recorder.markIncomplete(active.run, {
         code: 'drain_timed_out',
         message: `Joined wrapped calls did not settle within ${this.drainTimeoutMs}ms.`,
       });
     }
-    if (businessError !== undefined) {
+    if (businessError !== undefined && active.run.status === 'running') {
       active.recorder.markIncomplete(active.run, {
         code: 'final_state_unavailable',
         message:
@@ -384,6 +450,31 @@ class Agent<
       throw businessError;
     }
     return result as TResult;
+  }
+
+  private scheduleExport(active: GenericRun): void {
+    for (const exporter of this.exporters) {
+      void exporter
+        .exportSnapshot({
+          manifest: active.recorder.getManifest(active.run),
+          events: active.recorder.getEvents(active.run),
+        })
+        .then((delivery) => {
+          if (delivery.state === 'not_queued') {
+            this.report({
+              code: 'EXPORT_FAILED',
+              message:
+                delivery.message ?? 'The committed snapshot could not be queued for OTLP export.',
+            });
+          }
+        })
+        .catch((error: unknown) => {
+          this.report({
+            code: 'EXPORT_FAILED',
+            message: `Could not queue committed snapshot for OTLP export: ${message(error)}`,
+          });
+        });
+    }
   }
 
   private async startRun(input: JsonValue): Promise<GenericRun> {

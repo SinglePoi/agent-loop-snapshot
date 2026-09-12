@@ -109,6 +109,7 @@ export async function runReleaseSmoke() {
       '@agent-loop-snapshot/instrumentation-openai': packageFile(
         'agent-loop-snapshot-instrumentation-openai',
       ),
+      '@agent-loop-snapshot/otel-export': packageFile('agent-loop-snapshot-otel-export'),
       '@agent-loop-snapshot/otel-import': packageFile('agent-loop-snapshot-otel-import'),
       '@agent-loop-snapshot/recorder': packageFile('agent-loop-snapshot-recorder'),
       '@agent-loop-snapshot/replay': packageFile('agent-loop-snapshot-replay'),

@@ -1,0 +1,11 @@
+{
+  "targetAlias": "local-collector",
+  "endpoint": "http://127.0.0.1:4318/v1/traces",
+  "serviceName": "agent-loop-snapshot-example",
+  "queueDir": "./runs/otlp-queue",
+  "contentPolicy": "metadata-only",
+  "batchSpanLimit": 512,
+  "timeoutMs": 10000,
+  "retryMaxAttempts": 3,
+  "retryBudgetMs": 30000
+}

@@ -8,6 +8,7 @@ import {
   createDefaultRedactionPipeline,
 } from '@agent-loop-snapshot/recorder';
 import type { EventId, JsonValue, RuntimeDescriptor } from '@agent-loop-snapshot/schema';
+import type { ExporterFlushReport, OtlpExporter } from '@agent-loop-snapshot/otel-export';
 
 import {
   currentInstrumentationScope,
@@ -27,6 +28,7 @@ export interface InstrumentationDiagnostic {
     | 'INTEGRATION_OUTSIDE_RUN'
     | 'RECORDING_SETUP_FAILED'
     | 'RECORDING_FINALIZATION_FAILED'
+    | 'EXPORT_FAILED'
     | 'DIAGNOSTIC_CALLBACK_FAILED';
   readonly message: string;
   readonly integration?: string;
@@ -128,6 +130,8 @@ export interface InitInstrumentationOptions {
   readonly recordingFailure?: RecordingFailureMode;
   /** Maximum wait for SDK wrapper work started but not awaited by the callback. */
   readonly drainTimeoutMs?: number;
+  /** Exporters receive a committed local snapshot asynchronously after each run. */
+  readonly exporters?: readonly OtlpExporter[];
   readonly onDiagnostic?: (diagnostic: InstrumentationDiagnostic) => void;
 }
 
@@ -158,6 +162,18 @@ function safeErrorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message.trim() !== '' ? error.message : fallback;
 }
 
+function incompleteExportMessage(report: ExporterFlushReport): string | undefined {
+  const incomplete = report.deliveries.find((delivery) => delivery.state !== 'accepted');
+  if (incomplete !== undefined) {
+    return `OTLP export shutdown did not complete: ${incomplete.message ?? incomplete.state}.`;
+  }
+  if (report.deadlineExceeded) return 'OTLP export shutdown exceeded its deadline.';
+  if (report.pendingCount > 0) {
+    return `OTLP export shutdown left ${String(report.pendingCount)} batch(es) queued.`;
+  }
+  return undefined;
+}
+
 class Controller implements InstrumentationController {
   private readonly snapshotDir: string;
   private readonly runtime: RuntimeDescriptor;
@@ -165,6 +181,7 @@ class Controller implements InstrumentationController {
   private readonly drainTimeoutMs: number;
   private readonly onDiagnostic: ((diagnostic: InstrumentationDiagnostic) => void) | undefined;
   private readonly integrations: readonly InstrumentationIntegration[];
+  private readonly exporters: readonly OtlpExporter[];
   private readonly activeRuns = new Set<Promise<unknown>>();
   private readonly integrationReporter = (diagnostic: InstrumentationDiagnostic): void =>
     this.reportDiagnostic(diagnostic);
@@ -181,6 +198,7 @@ class Controller implements InstrumentationController {
     this.drainTimeoutMs = Math.max(0, Math.floor(options.drainTimeoutMs ?? 5_000));
     this.onDiagnostic = options.onDiagnostic;
     this.integrations = [...new Set(options.integrations ?? [])];
+    this.exporters = [...new Set(options.exporters ?? [])];
 
     const acquired: InstrumentationIntegration[] = [];
     try {
@@ -229,6 +247,22 @@ class Controller implements InstrumentationController {
     }
     this.closed = true;
     await Promise.allSettled([...this.activeRuns]);
+    await Promise.all(
+      this.exporters.map(async (exporter) => {
+        try {
+          const report = await exporter.shutdown();
+          const incomplete = incompleteExportMessage(report);
+          if (incomplete !== undefined) {
+            this.reportDiagnostic({ code: 'EXPORT_FAILED', message: incomplete });
+          }
+        } catch (error) {
+          this.reportDiagnostic({
+            code: 'EXPORT_FAILED',
+            message: `Could not flush OTLP export on shutdown: ${safeErrorMessage(error, 'unknown error')}`,
+          });
+        }
+      }),
+    );
     for (const integration of [...this.integrations].reverse()) {
       this.release(integration);
     }
@@ -369,6 +403,7 @@ class Controller implements InstrumentationController {
     try {
       await activeRun.recorder.observeRun(activeRun.run, { outcome: 'completed' });
       await activeRun.writer.commit(activeRun.recorder.getManifest(activeRun.run));
+      this.scheduleExport(activeRun);
     } catch (error) {
       await this.closeRun(activeRun);
       this.reportDiagnostic({
@@ -422,6 +457,7 @@ class Controller implements InstrumentationController {
         kind: 'runtime',
       });
       await activeRun.writer.commit(activeRun.recorder.getManifest(activeRun.run));
+      this.scheduleExport(activeRun);
     } catch (recordingError) {
       this.reportDiagnostic({
         code: 'RECORDING_FINALIZATION_FAILED',
@@ -455,6 +491,31 @@ class Controller implements InstrumentationController {
         message: `Could not close SDK recording: ${safeErrorMessage(error, 'unknown error')}`,
       });
     });
+  }
+
+  private scheduleExport(activeRun: InstrumentedRun): void {
+    for (const exporter of this.exporters) {
+      void exporter
+        .exportSnapshot({
+          manifest: activeRun.recorder.getManifest(activeRun.run),
+          events: activeRun.recorder.getEvents(activeRun.run),
+        })
+        .then((delivery) => {
+          if (delivery.state === 'not_queued') {
+            this.reportDiagnostic({
+              code: 'EXPORT_FAILED',
+              message:
+                delivery.message ?? 'The committed snapshot could not be queued for OTLP export.',
+            });
+          }
+        })
+        .catch((error: unknown) => {
+          this.reportDiagnostic({
+            code: 'EXPORT_FAILED',
+            message: `Could not queue committed snapshot for OTLP export: ${safeErrorMessage(error, 'unknown error')}`,
+          });
+        });
+    }
   }
 
   private reportDiagnostic(diagnostic: InstrumentationDiagnostic): void {
