@@ -1,10 +1,43 @@
 # Agent Loop Snapshot 用户使用手册
 
-本手册面向希望记录、查看、导入或导出 Agent 运行过程的使用者。它假设你正在本仓库的源码目录中使用项目；当前项目为私有 workspace，尚未作为 npm 包发布。
+本手册面向希望记录、查看、导入或导出 Agent 运行过程的使用者。它同时覆盖 npm 安装与源码开发：你可以只安装 CLI，也可以按需要安装 SDK 包。
 
 ## 1. 准备环境
 
-需要 Node.js `24.20.x` 与 pnpm `11.19.x`。在仓库根目录安装依赖并完成离线检查：
+需要 Node.js `24.20.x` 或兼容的 Node.js 24 版本。若只使用 CLI，不需要 pnpm。
+
+### 安装 CLI
+
+在自己的项目中安装：
+
+```powershell
+npm install --save-dev @agent-loop-snapshot/cli
+```
+
+随后用 `npx alsnap <命令>` 执行，例如：
+
+```powershell
+npx alsnap validate ./runs/run-123
+npx alsnap inspect ./runs/run-123 --json
+```
+
+### 安装 SDK
+
+按实际使用场景安装所需包：
+
+```powershell
+# 为自定义模型和工具函数记录运行过程
+npm install @agent-loop-snapshot/instrumentation
+
+# 为既有 OpenAI / Anthropic SDK 调用自动采集
+npm install @agent-loop-snapshot/instrumentation-openai @agent-loop-snapshot/instrumentation-anthropic
+```
+
+`@agent-loop-snapshot/instrumentation` 会自动安装它所需的核心依赖。除非直接使用底层 API，否则不需要单独安装 `schema`、`recorder`、`trace`、`graph` 或 `replay`。
+
+### 从源码开发
+
+仓库开发需要 Node.js `24.20.x` 与 pnpm `11.19.x`。在仓库根目录安装依赖并完成离线检查：
 
 ```powershell
 pnpm install
@@ -13,7 +46,7 @@ pnpm run check
 
 `pnpm run check` 不需要 API key、Docker 或外网模型服务。它会构建项目、运行单元测试和三个离线示例。
 
-常用命令通过 `pnpm alsnap -- <命令>` 执行。所有快照目录均应使用新的、尚不存在的输出目录，避免覆盖已有运行记录。
+以下命令示例均使用已安装 CLI 的 `npx alsnap`。在本仓库源码目录开发时，可等价改为 `pnpm alsnap -- <命令>`。所有快照目录均应使用新的、尚不存在的输出目录，避免覆盖已有运行记录。
 
 ## 2. 先体验：运行离线示例
 
@@ -23,7 +56,7 @@ pnpm run check
 pnpm build
 node examples/function-instrumentation/demo.mjs
 node examples/sdk-instrumentation/demo.mjs
-pnpm alsnap -- import-otel examples/otel-import/trace.json --output ./runs/otel-import --json
+npx alsnap import-otel examples/otel-import/trace.json --output ./runs/otel-import --json
 ```
 
 也可以一次运行全部示例：
@@ -106,16 +139,16 @@ try {
 
 ```powershell
 # 校验目录、事件与 artifact 引用
-pnpm alsnap -- validate ./runs/run-123
+npx alsnap validate ./runs/run-123
 
 # 查看不包含 payload 的运行摘要
-pnpm alsnap -- inspect ./runs/run-123
+npx alsnap inspect ./runs/run-123
 
 # 输出 Mermaid 因果图
-pnpm alsnap -- graph ./runs/run-123 --format mermaid
+npx alsnap graph ./runs/run-123 --format mermaid
 
 # 输出 JSON 时间线
-pnpm alsnap -- graph ./runs/run-123 --kind timeline --format json
+npx alsnap graph ./runs/run-123 --kind timeline --format json
 ```
 
 需要让脚本读取结果时，加上 `--json`。退出码 `0` 表示成功，`2` 表示快照无效、没有有效导入 trace，或导出未被完全接受，`1` 表示命令参数或运行错误。
@@ -125,8 +158,8 @@ pnpm alsnap -- graph ./runs/run-123 --kind timeline --format json
 导入仅接受 OTLP/HTTP JSON 的 `ExportTraceServiceRequest`（包含 `resourceSpans`），不接受 protobuf、gRPC、控制台文本或厂商 UI 导出文件：
 
 ```powershell
-pnpm alsnap -- import-otel trace-a.json trace-b.json --output ./imported-runs --json
-pnpm alsnap -- inspect ./imported-runs/run_<generated-id> --json
+npx alsnap import-otel trace-a.json trace-b.json --output ./imported-runs --json
+npx alsnap inspect ./imported-runs/run_<generated-id> --json
 ```
 
 每个输入文件最多 64 MiB。导入结果是 `otel-import` 观察快照：可以 `validate`、`inspect` 和 `graph`，但不能 replay、resume 或编译为可执行 Workflow。导入也不会自动向外部发送数据。
@@ -156,13 +189,13 @@ pnpm alsnap -- inspect ./imported-runs/run_<generated-id> --json
 $env:OTLP_TRACES_ENDPOINT = 'http://127.0.0.1:4318/v1/traces'
 
 # 显示映射和过滤结果；不会联网、入队或读取凭据
-pnpm alsnap -- export-otel ./runs/run-123 --config ./export.json --dry-run --json
+npx alsnap export-otel ./runs/run-123 --config ./export.json --dry-run --json
 
 # 发送；网络短暂不可用时会保留本地队列
-pnpm alsnap -- export-otel ./runs/run-123 --config ./export.json --json
+npx alsnap export-otel ./runs/run-123 --config ./export.json --json
 
 # 稍后仅续传相同配置指纹的本地队列
-pnpm alsnap -- export-otel --resume --config ./export.json --json
+npx alsnap export-otel --resume --config ./export.json --json
 ```
 
 `endpoint` 与 `endpointEnv` 必须二选一。生产目标应使用 HTTPS；仅 `localhost`、`127.0.0.1` 与 `::1` 可使用 HTTP。认证信息只放在环境变量中，并通过 `headersEnv` 写入“HTTP header 名 → 环境变量名”的映射，例如：
