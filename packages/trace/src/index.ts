@@ -69,6 +69,7 @@ export class ArtifactReadError extends Error {
 
 export interface ArtifactMetadata {
   readonly digest: string;
+  /** Canonical path within the snapshot, always using forward slashes. */
   readonly path: string;
   readonly exists: boolean;
   readonly byte_length?: number;
@@ -604,6 +605,7 @@ async function loadArtifactMetadata(
   const metadata = new Map<string, ArtifactMetadata>();
   for (const digest of [...digests].sort()) {
     const artifactPath = join(artifactDirectory, `sha256-${digest}`);
+    const artifactSnapshotPath = `artifacts/sha256-${digest}`;
     let exists = false;
     let actualByteLength: number | undefined;
     try {
@@ -677,7 +679,7 @@ async function loadArtifactMetadata(
 
     metadata.set(digest, {
       digest,
-      path: artifactPath,
+      path: artifactSnapshotPath,
       exists,
       ...(expectedByteLengths.length === 1 ? { byte_length: expectedByteLengths[0] } : {}),
       ...(actualByteLength === undefined ? {} : { actual_byte_length: actualByteLength }),
@@ -832,7 +834,13 @@ export async function loadTraceSnapshot(
     }
     let trustedFile;
     try {
-      trustedFile = await inspectSnapshotPath(boundary, metadata.path, 'file');
+      // ArtifactMetadata.path is deliberately portable; construct the local path
+      // from the validated digest rather than treating that public value as one.
+      trustedFile = await inspectSnapshotPath(
+        boundary,
+        join(root, 'artifacts', `sha256-${digest}`),
+        'file',
+      );
     } catch (error) {
       throw new ArtifactReadError(
         'ARTIFACT_UNTRUSTED',

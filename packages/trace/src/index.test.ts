@@ -117,6 +117,23 @@ test('loads artifact metadata and reports a mismatched artifact size', async () 
   );
 });
 
+test('reports canonical snapshot-relative artifact metadata paths', async () => {
+  const root = await mkdtemp(join(process.env.TEMP ?? process.cwd(), 'alsnap-artifact-path-'));
+  try {
+    const first = await createArtifactSnapshot(join(root, 'first'));
+    const second = await createArtifactSnapshot(join(root, 'second'));
+    const firstMetadata = (await loadTraceSnapshot(first.source)).artifacts.get(first.digest);
+    const secondMetadata = (await loadTraceSnapshot(second.source)).artifacts.get(second.digest);
+
+    assert.ok(firstMetadata && secondMetadata);
+    assert.equal(firstMetadata.path, `artifacts/sha256-${first.digest}`);
+    assert.equal(secondMetadata.path, firstMetadata.path);
+    assert.doesNotMatch(firstMetadata.path, /\\|^[A-Za-z]:/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('limits untrusted event and artifact reads', async () => {
   const eventLimited = await loadTraceSnapshot(resolve(schemaFixtures, 'minimal-success'), {
     maxEventFileBytes: 1,

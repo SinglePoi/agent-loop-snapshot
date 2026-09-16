@@ -110,6 +110,7 @@ export async function runReleaseSmoke() {
         'agent-loop-snapshot-instrumentation-openai',
       ),
       '@agent-loop-snapshot/otel-import': packageFile('agent-loop-snapshot-otel-import'),
+      '@agent-loop-snapshot/otel-export': packageFile('agent-loop-snapshot-otel-export'),
       '@agent-loop-snapshot/recorder': packageFile('agent-loop-snapshot-recorder'),
       '@agent-loop-snapshot/replay': packageFile('agent-loop-snapshot-replay'),
       '@agent-loop-snapshot/schema': packageFile('agent-loop-snapshot-schema'),
@@ -143,6 +144,7 @@ import { dirname, join } from 'node:path';\n
 import { runCli } from '@agent-loop-snapshot/cli';\n
 import { instrument } from '@agent-loop-snapshot/instrumentation';\n
 import { openAIIntegration } from '@agent-loop-snapshot/instrumentation-openai';\n
+import { dryRunOtlpExport } from '@agent-loop-snapshot/otel-export';\n
 const [fixture, output] = process.argv.slice(2);\n
 if (fixture === undefined || output === undefined) {\n  throw new Error('Fixture and output paths are required.');\n}\n
 const io = { stdout: () => undefined, stderr: () => undefined };\n
@@ -150,6 +152,10 @@ const generic = instrument({\n  snapshotDir: join(dirname(output), 'generic'),\n
 await generic.run({ input: { goal: 'tarball smoke' } }, async ({ model, checkpoint }) => {\n  const value = await model.call('ok');\n  await checkpoint({ value });\n  return value;\n});\n
 // Loading this integration verifies the packed SDK dependency graph without contacting an API.\n
 void openAIIntegration({ recording: 'metadata-only' });\n
+const exportPreview = dryRunOtlpExport({ manifest: { run_id: 'release-smoke-export' }, events: [] });\n
+if (exportPreview.delivery.state !== 'dry_run') {\n
+  throw new Error('Packed OTLP export dry-run did not return dry_run.');\n
+}\n
 const otlpInput = join(dirname(output), 'trace.json');\n
 await mkdir(dirname(output), { recursive: true });\n
 await writeFile(otlpInput, JSON.stringify({ resourceSpans: [{ scopeSpans: [{ spans: [{ traceId: '11111111111111111111111111111111', spanId: '2222222222222222', name: 'smoke', startTimeUnixNano: '1' }] }] }] }));\n

@@ -15,6 +15,9 @@ import {
   isExportEndpointConfigured,
   mapSnapshotToOtlp,
   otelExportContractVersion,
+  otelExportReliableDeliveryContractVersion,
+  otlpJsonMappingVersion,
+  otlpPersistentQueueVersion,
 } from './index.js';
 
 const emptyRequest = { resourceSpans: [] };
@@ -80,6 +83,13 @@ function event(
 
 test('exports a stable contract version', () => {
   assert.equal(otelExportContractVersion, 'otel-export-1.0');
+});
+
+test('freezes a distinct reliable-delivery migration contract', () => {
+  assert.equal(otelExportReliableDeliveryContractVersion, 'otel-export-2.0');
+  assert.equal(otlpJsonMappingVersion, 'otlp-json-mapping-2');
+  assert.equal(otlpPersistentQueueVersion, 'otlp-persistent-queue-2');
+  assert.notEqual(otelExportReliableDeliveryContractVersion, otelExportContractVersion);
 });
 
 test('requires exactly one endpoint source', () => {

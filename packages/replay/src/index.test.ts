@@ -31,6 +31,7 @@ import {
   SemanticReplayRunner,
   ScriptedSemanticRuntimeAdapter,
   VerifiedReplayRunner,
+  assessTraceExecution,
   compareVerifiedReplayValues,
   compileTraceToWorkflow,
   createRecordedReplayAdapterSet,
@@ -62,6 +63,15 @@ async function loadExampleTrace() {
   assert.equal(trace.valid, true, JSON.stringify(trace.diagnostics));
   return trace;
 }
+
+test('assesses execution eligibility from an already loaded trace', async () => {
+  const trace = await loadExampleTrace();
+
+  assert.deepEqual(assessTraceExecution(trace), {
+    eligibility: 'eligible_for_validation',
+    reason: 'Snapshot has complete native or SDK recording evidence.',
+  });
+});
 
 interface RecordedTraceFixture {
   readonly directory: string;

@@ -2,6 +2,16 @@
   "name": "@agent-loop-snapshot/cli",
   "version": "0.1.0",
   "private": true,
+  "description": "Validate, inspect, and visualize Agent Loop Snapshot artifacts.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SinglePoi/agent-loop-snapshot.git"
+  },
+  "author": "Agent Loop Snapshot contributors",
+  "homepage": "https://github.com/SinglePoi/agent-loop-snapshot",
+  "bugs": {
+    "url": "https://github.com/SinglePoi/agent-loop-snapshot/issues"
+  },
   "files": [
     "dist",
     "!dist/**/*.test.*",

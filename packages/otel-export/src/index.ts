@@ -11,6 +11,22 @@ import type {
 export const otelExportContractVersion = 'otel-export-1.0' as const;
 export type OtelExportContractVersion = typeof otelExportContractVersion;
 
+/**
+ * Frozen target for the reliable-delivery migration.  No v2 producer exists
+ * yet: TDX-01 through TDX-05 must implement it before this becomes the active
+ * contract version.  Keeping this separate prevents a v1 queue entry from
+ * being mistaken for a v2 entry merely because its JSON fields look similar.
+ */
+export const otelExportReliableDeliveryContractVersion = 'otel-export-2.0' as const;
+export type OtelExportReliableDeliveryContractVersion =
+  typeof otelExportReliableDeliveryContractVersion;
+
+/** Versions which become part of a v2 batch identity and persistent entry. */
+export const otlpJsonMappingVersion = 'otlp-json-mapping-2' as const;
+export const otlpPersistentQueueVersion = 'otlp-persistent-queue-2' as const;
+export type OtlpJsonMappingVersion = typeof otlpJsonMappingVersion;
+export type OtlpPersistentQueueVersion = typeof otlpPersistentQueueVersion;
+
 export type ExportContentPolicy = 'metadata-only' | 'redacted-content';
 
 export interface OtelExportConfig {
@@ -177,6 +193,27 @@ export interface ExportBatch {
   readonly report: ExportMappingReport;
 }
 
+/**
+ * Stable destination identity supplied by the user.  It distinguishes a
+ * deliberately selected receiver or tenant from a rotating credential.  Its
+ * value must be safe to hash and persist; it must never contain a credential.
+ */
+export interface ExportDestinationIdentity {
+  readonly targetAlias: string;
+  readonly destinationIdentity: string;
+  readonly destinationGeneration: string;
+}
+
+/** Frozen v2 batch identity. The encoded payload is not part of this shape. */
+export interface ExportBatchIdentity extends ExportDestinationIdentity {
+  readonly reliableDeliveryContractVersion: OtelExportReliableDeliveryContractVersion;
+  readonly mappingVersion: OtlpJsonMappingVersion;
+  readonly queueVersion: OtlpPersistentQueueVersion;
+  readonly contentPolicy: ExportContentPolicy;
+  readonly encoding: 'otlp-http-json';
+  readonly batchId: string;
+}
+
 export type ExportDeliveryState =
   | 'dry_run'
   | 'not_queued'
@@ -185,6 +222,22 @@ export type ExportDeliveryState =
   | 'retryable'
   | 'rejected'
   | 'exhausted'
+  | 'unknown_delivery';
+
+/**
+ * Canonical states for reliable delivery.  v1 aliases above remain exported
+ * for source compatibility until TDX-05 migrates the factory and CLI.
+ */
+export type ReliableDeliveryState =
+  | 'not_sent'
+  | 'configuration_blocked'
+  | 'pending'
+  | 'accepted'
+  | 'accepted_with_warnings'
+  | 'partially_rejected'
+  | 'permanently_rejected'
+  | 'retry_scheduled'
+  | 'retry_exhausted'
   | 'unknown_delivery';
 
 export interface ExportDeliveryReport {
@@ -197,6 +250,33 @@ export interface ExportDeliveryReport {
   readonly retryAfterMs?: number;
   readonly attempts: number;
   readonly message?: string;
+}
+
+/** One batch outcome in a reliable-delivery job. */
+export interface ReliableBatchDeliveryReport {
+  readonly identity: ExportBatchIdentity;
+  readonly state: ReliableDeliveryState;
+  readonly attempted: boolean;
+  readonly acceptedSpanCount: number;
+  readonly rejectedSpanCount: number;
+  readonly attempts: number;
+  readonly nextAttemptAt?: string;
+  /** Sanitized diagnostic only; never include endpoint, headers, or payload. */
+  readonly message?: string;
+}
+
+/**
+ * The v2 aggregate result. A single snapshot may create several batches, so a
+ * queue acknowledgement is deliberately not represented as remote acceptance.
+ */
+export interface ReliableExportDeliveryReport {
+  readonly reliableDeliveryContractVersion: OtelExportReliableDeliveryContractVersion;
+  readonly sourceRunId: string;
+  readonly state: ReliableDeliveryState;
+  readonly batches: readonly ReliableBatchDeliveryReport[];
+  readonly pendingBatchCount: number;
+  readonly pendingSpanCount: number;
+  readonly unknownDeliveryBatchCount: number;
 }
 
 export interface OtlpPartialSuccess {

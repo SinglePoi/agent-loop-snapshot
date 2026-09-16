@@ -52,7 +52,9 @@ Recorder 包提供 `startRun`、`appendEvent`、`checkpoint`、`completeRun` 和
 
 `RedactionPipeline` 支持 JSON Pointer 字段规则、数组通配符、正则规则和自定义 redactor。通过 `asInterceptor()` 接入 Recorder 时，脱敏在 JSONL 持久化前执行，并只在 `security.redactions` 中记录类别、路径和策略。`createDefaultRedactionPipeline()` 覆盖常见 API key、Bearer authorization 和敏感字段；JSON 或文本 artifact 应在 `ArtifactStore.put()` 前通过 `redactArtifact()` 处理，二进制内容不会被猜测解码。
 
-`Trace` 包的 `loadTraceSnapshot()` 流式读取 `events.jsonl`，加载 manifest、checkpoint 和 artifact metadata，并建立 event、children、actor 和 type 索引。查询模型支持按事件 ID、父子关系、actor、类型、sequence 和时间范围检索；加载阶段只读取 artifact metadata，内容通过 `readArtifact()` 按需读取。加载器会返回 schema、JSONL、因果关系和 artifact 完整性诊断，未知事件类型仍作为 opaque event 保留。
+`Trace` 包的 `loadTraceSnapshot()` 流式读取 `events.jsonl`，加载 manifest、checkpoint 和 artifact metadata，并建立 event、children、actor 和 type 索引。Artifact metadata 的 `path` 始终是以 `/` 分隔的快照相对路径，因而不会泄露加载机器目录；内容通过 `readArtifact()` 按需读取。查询模型支持按事件 ID、父子关系、actor、类型、sequence 和时间范围检索；加载器会返回 schema、JSONL、因果关系和 artifact 完整性诊断，未知事件类型仍作为 opaque event 保留。
+
+需要在加载后决定执行资格时，调用 `@agent-loop-snapshot/replay` 的 `assessTraceExecution(trace)`；它直接复用已加载的 `TraceSnapshot`，无需再次读取快照目录。结果只是证据资格判断，仍不授予执行权限。
 
 `Graph` 包提供因果 DAG、调用树和线性时间线投影。DAG 保留并行分支和多父节点汇合；投影支持 actor、事件类型、状态和 sequence 范围过滤，并默认折叠连续模型流式事件和低层噪声，同时保留每个图节点对应的源 event ID。
 
