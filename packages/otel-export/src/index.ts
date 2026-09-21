@@ -31,6 +31,34 @@ export type OtlpPersistentQueueVersion = typeof otlpPersistentQueueVersion;
 
 export type ExportContentPolicy = 'metadata-only' | 'redacted-content';
 
+/**
+ * Upper bounds applied before an OTLP request can be persisted or sent. These
+ * defaults keep one untrusted snapshot from materializing an unbounded body.
+ */
+export const defaultOtelExportMappingLimits = {
+  maxStringBytes: 16 * 1024,
+  maxCollectionItems: 128,
+  maxContentDepth: 16,
+  maxSpans: 4_096,
+  maxAttributesPerSpan: 128,
+  maxEventsPerSpan: 128,
+  maxLinksPerSpan: 128,
+  maxSpanBytes: 256 * 1024,
+  maxRequestBytes: 3 * 1024 * 1024,
+} as const;
+
+export interface OtelExportMappingLimits {
+  readonly maxStringBytes: number;
+  readonly maxCollectionItems: number;
+  readonly maxContentDepth: number;
+  readonly maxSpans: number;
+  readonly maxAttributesPerSpan: number;
+  readonly maxEventsPerSpan: number;
+  readonly maxLinksPerSpan: number;
+  readonly maxSpanBytes: number;
+  readonly maxRequestBytes: number;
+}
+
 export interface OtelExportConfig {
   readonly targetAlias: string;
   /** Exactly one of endpoint and endpointEnv must be supplied by callers. */
@@ -40,6 +68,8 @@ export interface OtelExportConfig {
   readonly headersEnv?: Readonly<Record<string, string>>;
   readonly serviceName: string;
   readonly contentPolicy?: ExportContentPolicy;
+  /** Optional bounded overrides shared by SDK, CLI, dry-run, and queue paths. */
+  readonly mappingLimits?: Partial<OtelExportMappingLimits>;
   readonly timeoutMs?: number;
   readonly batchSpanLimit?: number;
   readonly retryMaxAttempts?: number;
@@ -145,6 +175,7 @@ export interface OtelExportMappingOptions {
   readonly contentPolicy?: ExportContentPolicy;
   readonly serviceName?: string;
   readonly redaction?: OutboundRedactionPipeline;
+  readonly limits?: Partial<OtelExportMappingLimits>;
 }
 
 export interface OtelExportMappingResult {
@@ -167,7 +198,13 @@ export type ExportLossCode =
   | 'unknown_status_preserved'
   | 'observation_only_preserved'
   | 'unsupported_event'
-  | 'invalid_source_id';
+  | 'ambiguous_call_finish'
+  | 'invalid_source_id'
+  | 'metadata_filtered'
+  | 'value_truncated'
+  | 'limit_exceeded'
+  | 'span_rejected'
+  | 'request_truncated';
 
 export interface ExportMappingLoss {
   readonly code: ExportLossCode;

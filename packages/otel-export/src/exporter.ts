@@ -135,6 +135,7 @@ export function createOtlpExporter(config: OtelExportConfig): OtlpExporter {
       }
       const mapping = mapSnapshotToOtlp(snapshot, {
         ...(config.contentPolicy === undefined ? {} : { contentPolicy: config.contentPolicy }),
+        ...(config.mappingLimits === undefined ? {} : { limits: config.mappingLimits }),
         serviceName: config.serviceName,
       });
       try {

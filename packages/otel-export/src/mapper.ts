@@ -10,6 +10,7 @@ import type {
 } from '@agent-loop-snapshot/schema';
 
 import {
+  defaultOtelExportMappingLimits,
   otelExportContractVersion,
   type ExportContentPolicy,
   type ExportDeliveryReport,
@@ -24,6 +25,7 @@ import {
   type OtlpSpanEvent,
   type OtlpTraceSpan,
   type OtelExportDryRun,
+  type OtelExportMappingLimits,
   type OtelExportMappingOptions,
   type OtelExportMappingResult,
   type OutboundRedactionPipeline,
@@ -44,39 +46,158 @@ interface CallFinish {
   readonly failed: boolean;
 }
 
+type CallKind = CallStart['kind'];
+
 interface MapState {
   readonly source: SnapshotSource;
   readonly completeness: SnapshotCompleteness;
   readonly limitations: readonly SnapshotLimitation[];
   readonly policy: ExportContentPolicy;
   readonly redaction: OutboundRedactionPipeline;
+  readonly limits: OtelExportMappingLimits;
   readonly losses: ExportMappingLoss[];
   droppedFieldCount: number;
 }
 
 const secretKey = /(?:api[_-]?key|authorization|password|secret|token)/iu;
+const correlationKey = /^correlation[_-]?key$/iu;
 const bearer = /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/giu;
 
 function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function asJsonValue(value: unknown): JsonValue | undefined {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
-  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
-  if (Array.isArray(value)) {
-    const items = value.map(asJsonValue);
-    return items.every((item) => item !== undefined) ? (items as JsonValue[]) : undefined;
+function normalizedLimit(value: number | undefined, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (!Number.isSafeInteger(value) || value < 1) return fallback;
+  return value;
+}
+
+function mappingLimits(
+  overrides: Partial<OtelExportMappingLimits> | undefined,
+): OtelExportMappingLimits {
+  return {
+    maxStringBytes: normalizedLimit(
+      overrides?.maxStringBytes,
+      defaultOtelExportMappingLimits.maxStringBytes,
+    ),
+    maxCollectionItems: normalizedLimit(
+      overrides?.maxCollectionItems,
+      defaultOtelExportMappingLimits.maxCollectionItems,
+    ),
+    maxContentDepth: normalizedLimit(
+      overrides?.maxContentDepth,
+      defaultOtelExportMappingLimits.maxContentDepth,
+    ),
+    maxSpans: normalizedLimit(overrides?.maxSpans, defaultOtelExportMappingLimits.maxSpans),
+    maxAttributesPerSpan: normalizedLimit(
+      overrides?.maxAttributesPerSpan,
+      defaultOtelExportMappingLimits.maxAttributesPerSpan,
+    ),
+    maxEventsPerSpan: normalizedLimit(
+      overrides?.maxEventsPerSpan,
+      defaultOtelExportMappingLimits.maxEventsPerSpan,
+    ),
+    maxLinksPerSpan: normalizedLimit(
+      overrides?.maxLinksPerSpan,
+      defaultOtelExportMappingLimits.maxLinksPerSpan,
+    ),
+    maxSpanBytes: normalizedLimit(
+      overrides?.maxSpanBytes,
+      defaultOtelExportMappingLimits.maxSpanBytes,
+    ),
+    maxRequestBytes: normalizedLimit(
+      overrides?.maxRequestBytes,
+      defaultOtelExportMappingLimits.maxRequestBytes,
+    ),
+  };
+}
+
+function truncateUtf8(
+  value: string,
+  maxBytes: number,
+): { readonly value: string; readonly truncated: boolean } {
+  let bytes = 0;
+  let end = 0;
+  for (const codePoint of value) {
+    const size = codePoint.length === 1 ? (codePoint.charCodeAt(0) < 0x80 ? 1 : 3) : 4;
+    if (bytes + size > maxBytes) return { value: value.slice(0, end), truncated: true };
+    bytes += size;
+    end += codePoint.length;
   }
-  if (isRecord(value)) {
-    const result: JsonObject = {};
-    for (const [key, nested] of Object.entries(value)) {
-      const parsed = asJsonValue(nested);
-      if (parsed !== undefined) result[key] = parsed;
+  return { value, truncated: false };
+}
+
+function dangerousKey(key: string): boolean {
+  return key === '__proto__' || key === 'constructor' || key === 'prototype';
+}
+
+function boundedJsonValue(
+  value: unknown,
+  state: MapState,
+  path: string,
+  depth = 0,
+  ancestors = new Set<object>(),
+): JsonValue | undefined {
+  if (value === null || typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    const limited = truncateUtf8(value, state.limits.maxStringBytes);
+    if (limited.truncated)
+      loss(state, 'value_truncated', 'A string was truncated to the outbound byte limit.');
+    return limited.value;
+  }
+  if (typeof value === 'number') {
+    if (Number.isFinite(value)) return value;
+    loss(state, 'content_filtered', 'A non-finite number was omitted from outbound content.');
+    return undefined;
+  }
+  if (typeof value !== 'object' || value === null) {
+    loss(state, 'content_filtered', 'A non-JSON value was omitted from outbound content.');
+    return undefined;
+  }
+  if (depth >= state.limits.maxContentDepth || ancestors.has(value)) {
+    loss(state, 'limit_exceeded', 'Nested or cyclic content was omitted by outbound limits.');
+    return undefined;
+  }
+  const nextAncestors = new Set(ancestors).add(value);
+  if (Array.isArray(value)) {
+    const result: JsonValue[] = [];
+    const count = Math.min(value.length, state.limits.maxCollectionItems);
+    if (value.length > count)
+      loss(state, 'limit_exceeded', 'A content array exceeded the outbound item limit.');
+    for (let index = 0; index < count; index += 1) {
+      const item = boundedJsonValue(
+        value[index],
+        state,
+        `${path}/${String(index)}`,
+        depth + 1,
+        nextAncestors,
+      );
+      if (item !== undefined) result.push(item);
     }
     return result;
   }
-  return undefined;
+  if (!isRecord(value)) {
+    loss(state, 'content_filtered', 'A non-JSON object was omitted from outbound content.');
+    return undefined;
+  }
+  const result: JsonObject = {};
+  let count = 0;
+  for (const key in value) {
+    if (!Object.hasOwn(value, key)) continue;
+    if (dangerousKey(key)) {
+      loss(state, 'metadata_filtered', 'A dangerous object key was omitted from outbound content.');
+      continue;
+    }
+    count += 1;
+    if (count > state.limits.maxCollectionItems) {
+      loss(state, 'limit_exceeded', 'A content object exceeded the outbound item limit.');
+      break;
+    }
+    const item = boundedJsonValue(value[key], state, `${path}/${key}`, depth + 1, nextAncestors);
+    if (item !== undefined) result[key] = item;
+  }
+  return result;
 }
 
 function stableHex(seed: string, bytes: number): string {
@@ -140,9 +261,13 @@ export function createDefaultOutboundRedactionPipeline(
       return value.map((item, index) => redact(item, `${path}/${String(index)}`));
     const result: JsonObject = {};
     for (const [key, nested] of Object.entries(value)) {
-      result[key] = secretKey.test(key)
-        ? '[REDACTED:secret]'
-        : redact(nested, `${path}/${key.replaceAll('~', '~0').replaceAll('/', '~1')}`);
+      if (correlationKey.test(key)) {
+        result[`${key}_hash`] = stableHex(`correlation:${String(nested)}`, 16);
+      } else {
+        result[key] = secretKey.test(key)
+          ? '[REDACTED:secret]'
+          : redact(nested, `${path}/${key.replaceAll('~', '~0').replaceAll('/', '~1')}`);
+      }
     }
     return result;
   };
@@ -171,7 +296,7 @@ function serializeContent(value: JsonValue): string {
 }
 
 function contentAttribute(state: MapState, key: string, value: unknown, path: string): JsonObject {
-  const json = asJsonValue(value);
+  const json = boundedJsonValue(value, state, path);
   if (json === undefined) {
     state.droppedFieldCount += 1;
     loss(state, 'content_filtered', 'A non-JSON content field was omitted.');
@@ -182,14 +307,26 @@ function contentAttribute(state: MapState, key: string, value: unknown, path: st
     loss(state, 'content_filtered', 'Content fields were omitted by metadata-only policy.');
     return {};
   }
-  return { [key]: serializeContent(state.redaction.redact(json, path)) };
+  try {
+    const redacted = boundedJsonValue(state.redaction.redact(json, path), state, path);
+    if (redacted === undefined) {
+      state.droppedFieldCount += 1;
+      loss(state, 'content_filtered', 'A redaction result could not be safely exported.');
+      return {};
+    }
+    return { [key]: serializeContent(redacted) };
+  } catch {
+    state.droppedFieldCount += 1;
+    loss(state, 'content_filtered', 'A content field was omitted because redaction failed.');
+    return {};
+  }
 }
 
 function callPayload(event: EventEnvelope<string, unknown>): CallPayload | undefined {
   if (!isRecord(event.payload) || typeof event.payload.correlation_key !== 'string') {
     return undefined;
   }
-  return { ...event.payload, correlation_key: event.payload.correlation_key };
+  return event.payload as CallPayload;
 }
 
 function parentCandidates(
@@ -199,18 +336,122 @@ function parentCandidates(
 ): string[] {
   const candidates = new Set<string>();
   const visited = new Set<string>();
-  const visit = (eventId: string): void => {
-    if (visited.has(eventId)) return;
+  const pending = [...event.parent_ids];
+  while (pending.length > 0) {
+    const eventId = pending.pop();
+    if (eventId === undefined || visited.has(eventId)) continue;
     visited.add(eventId);
     const span = owner.get(eventId);
     if (span !== undefined) {
       candidates.add(span);
-      return;
+      continue;
     }
-    events.get(eventId)?.parent_ids.forEach(visit);
-  };
-  event.parent_ids.forEach(visit);
+    pending.push(...(events.get(eventId)?.parent_ids ?? []));
+  }
   return [...candidates].sort();
+}
+
+function callKindForRequested(event: EventEnvelope<string, unknown>): CallKind | undefined {
+  if (event.type === 'model.requested') return 'model';
+  if (event.type === 'tool.requested') return 'tool';
+  return undefined;
+}
+
+function callTerminal(
+  event: EventEnvelope<string, unknown>,
+): { readonly kind: CallKind; readonly failed: boolean } | undefined {
+  if (event.type === 'model.completed') return { kind: 'model', failed: false };
+  if (event.type === 'model.failed') return { kind: 'model', failed: true };
+  if (event.type === 'tool.completed') return { kind: 'tool', failed: false };
+  if (event.type === 'tool.failed') return { kind: 'tool', failed: true };
+  return undefined;
+}
+
+/**
+ * Returns the shortest parent-graph distance to each ancestor without
+ * recursion, so valid deep snapshot histories cannot overflow the stack.
+ */
+function ancestorDistances(
+  event: EventEnvelope<string, unknown>,
+  events: ReadonlyMap<string, EventEnvelope<string, unknown>>,
+): ReadonlyMap<string, number> {
+  const distances = new Map<string, number>();
+  const pending = event.parent_ids.map((eventId) => ({ eventId, distance: 1 }));
+  for (let index = 0; index < pending.length; index += 1) {
+    const item = pending[index]!;
+    const previous = distances.get(item.eventId);
+    if (previous !== undefined && previous <= item.distance) continue;
+    distances.set(item.eventId, item.distance);
+    const parent = events.get(item.eventId);
+    if (parent !== undefined) {
+      pending.push(
+        ...parent.parent_ids.map((eventId) => ({ eventId, distance: item.distance + 1 })),
+      );
+    }
+  }
+  return distances;
+}
+
+function mapCallFinishes(
+  calls: readonly CallStart[],
+  ordered: readonly EventEnvelope<string, unknown>[],
+  events: ReadonlyMap<string, EventEnvelope<string, unknown>>,
+  runId: string,
+  state: MapState,
+): ReadonlyMap<string, CallFinish> {
+  const pending = new Set(calls.map((call) => call.event.event_id));
+  const finishes = new Map<string, CallFinish>();
+
+  for (const event of ordered) {
+    if (event.run_id !== runId) continue;
+    const terminal = callTerminal(event);
+    const payload = terminal === undefined ? undefined : callPayload(event);
+    if (terminal === undefined || payload === undefined) continue;
+    const candidates = calls.filter(
+      (call) =>
+        pending.has(call.event.event_id) &&
+        call.kind === terminal.kind &&
+        call.correlationKey === payload.correlation_key &&
+        call.event.sequence < event.sequence,
+    );
+    if (candidates.length === 0) continue;
+
+    const distances = ancestorDistances(event, events);
+    const related = candidates
+      .map((call) => ({ call, distance: distances.get(call.event.event_id) }))
+      .filter(
+        (item): item is { readonly call: CallStart; readonly distance: number } =>
+          item.distance !== undefined,
+      );
+    const nearestDistance = Math.min(...related.map((candidate) => candidate.distance));
+    const choices =
+      related.length === 0
+        ? candidates.sort(
+            (left, right) =>
+              left.event.sequence - right.event.sequence ||
+              left.event.event_id.localeCompare(right.event.event_id),
+          )
+        : related
+            .filter((item) => item.distance === nearestDistance)
+            .map((item) => item.call)
+            .sort(
+              (left, right) =>
+                left.event.sequence - right.event.sequence ||
+                left.event.event_id.localeCompare(right.event.event_id),
+            );
+    const call = choices[0];
+    if (call === undefined) continue;
+    if (choices.length > 1) {
+      loss(
+        state,
+        'ambiguous_call_finish',
+        'A terminal call had multiple possible requested-call matches; the earliest deterministic match was used.',
+      );
+    }
+    finishes.set(call.event.event_id, { event, failed: terminal.failed });
+    pending.delete(call.event.event_id);
+  }
+  return finishes;
 }
 
 function statusForTerminal(snapshot: ExportSnapshotInput): 'OK' | 'ERROR' | 'UNSET' {
@@ -226,42 +467,41 @@ function mapNativeOrSdk(snapshot: ExportSnapshotInput, state: MapState): ExportS
   const byId = new Map(ordered.map((event) => [event.event_id, event]));
   const traceId = stableHex(`trace:${snapshot.manifest.run_id}`, 16);
   const runSpanId = stableHex(`span:${snapshot.manifest.run_id}:run`, 8);
-  const calls = new Map<string, CallStart>();
-  const finishes = new Map<string, CallFinish>();
+  const calls: CallStart[] = [];
 
   for (const event of ordered) {
-    if (event.type !== 'model.requested' && event.type !== 'tool.requested') continue;
+    if (event.run_id !== snapshot.manifest.run_id) continue;
+    const kind = callKindForRequested(event);
+    if (kind === undefined) continue;
     const payload = callPayload(event);
     if (payload === undefined) {
       loss(state, 'unsupported_event', 'A requested call lacked a correlation key.');
       continue;
     }
-    const name = event.type === 'model.requested' ? payload.model : payload.tool;
-    calls.set(payload.correlation_key, {
+    if (calls.length >= state.limits.maxSpans - 1) {
+      loss(state, 'request_truncated', 'Requested calls exceeded the outbound span limit.');
+      continue;
+    }
+    const name = kind === 'model' ? payload.model : payload.tool;
+    calls.push({
       event,
-      kind: event.type === 'model.requested' ? 'model' : 'tool',
+      kind,
       correlationKey: payload.correlation_key,
       name: typeof name === 'string' ? name : 'unknown',
     });
   }
-  for (const event of ordered) {
-    if (!event.type.endsWith('.completed') && !event.type.endsWith('.failed')) continue;
-    const payload = callPayload(event);
-    if (payload !== undefined && calls.has(payload.correlation_key)) {
-      finishes.set(payload.correlation_key, { event, failed: event.type.endsWith('.failed') });
-    }
-  }
+  const finishes = mapCallFinishes(calls, ordered, byId, snapshot.manifest.run_id, state);
 
   const owner = new Map<string, string>();
   const callSpanId = new Map<string, string>();
-  for (const call of calls.values()) {
+  for (const call of calls) {
     const spanId = stableHex(
-      `span:${snapshot.manifest.run_id}:${call.kind}:${call.correlationKey}`,
+      `span:${snapshot.manifest.run_id}:${call.kind}:${call.event.event_id}`,
       8,
     );
-    callSpanId.set(call.correlationKey, spanId);
+    callSpanId.set(call.event.event_id, spanId);
     owner.set(call.event.event_id, spanId);
-    const finish = finishes.get(call.correlationKey);
+    const finish = finishes.get(call.event.event_id);
     if (finish !== undefined) owner.set(finish.event.event_id, spanId);
   }
 
@@ -271,11 +511,11 @@ function mapNativeOrSdk(snapshot: ExportSnapshotInput, state: MapState): ExportS
   const runAttributes: JsonObject = {
     'agent_loop_snapshot.source': state.source,
     'agent_loop_snapshot.completeness': state.completeness,
-    'agent_loop_snapshot.run_id': snapshot.manifest.run_id,
+    'agent_loop_snapshot.run_id_hash': stableHex(`run:${snapshot.manifest.run_id}`, 16),
   };
   if (state.limitations.length > 0) {
-    runAttributes['agent_loop_snapshot.limitation_codes'] = state.limitations.map(
-      (item) => item.code,
+    runAttributes['agent_loop_snapshot.limitation_code_hashes'] = state.limitations.map((item) =>
+      stableHex(`limitation:${item.code}`, 8),
     );
   }
   const runEvents: JsonObject[] = [];
@@ -295,7 +535,13 @@ function mapNativeOrSdk(snapshot: ExportSnapshotInput, state: MapState): ExportS
       event.type === 'run.started'
     )
       continue;
-    const details: JsonObject = { 'agent_loop_snapshot.event_type': event.type };
+    if (runEvents.length >= state.limits.maxEventsPerSpan) {
+      loss(state, 'limit_exceeded', 'Run events exceeded the outbound item limit.');
+      continue;
+    }
+    const details: JsonObject = {
+      'agent_loop_snapshot.event_type_hash': stableHex(`event-type:${event.type}`, 8),
+    };
     if (isRecord(event.payload)) {
       const content = contentAttribute(
         state,
@@ -325,10 +571,8 @@ function mapNativeOrSdk(snapshot: ExportSnapshotInput, state: MapState): ExportS
     },
   ];
 
-  for (const call of [...calls.values()].sort(
-    (left, right) => left.event.sequence - right.event.sequence,
-  )) {
-    const finish = finishes.get(call.correlationKey);
+  for (const call of [...calls].sort((left, right) => left.event.sequence - right.event.sequence)) {
+    const finish = finishes.get(call.event.event_id);
     const parents = parentCandidates(call.event, byId, owner);
     const primaryParent = parents[0] ?? runSpanId;
     if (parents.length > 1) {
@@ -343,7 +587,10 @@ function mapNativeOrSdk(snapshot: ExportSnapshotInput, state: MapState): ExportS
     const payloadField = call.kind === 'model' ? 'input' : 'arguments';
     const eventAttributes: JsonObject = {
       'agent_loop_snapshot.call_kind': call.kind,
-      'agent_loop_snapshot.correlation_key': call.correlationKey,
+      'agent_loop_snapshot.correlation_key_hash': stableHex(
+        `correlation:${call.correlationKey}`,
+        16,
+      ),
     };
     const requestedContent = contentAttribute(
       state,
@@ -382,7 +629,7 @@ function mapNativeOrSdk(snapshot: ExportSnapshotInput, state: MapState): ExportS
     }
     result.push({
       traceId,
-      spanId: callSpanId.get(call.correlationKey)!,
+      spanId: callSpanId.get(call.event.event_id)!,
       parentSpanId: primaryParent,
       name: call.kind === 'model' ? 'model.call' : 'tool.call',
       startTimeUnixNano: nano(call.event.timestamp),
@@ -409,24 +656,21 @@ function importedSpanFrom(
     return undefined;
   }
   const sourceParent = payload.parent_span_id;
-  const resource = asJsonValue(payload.resource);
-  const scope = asJsonValue(payload.scope);
-  const attributesValue = asJsonValue(payload.attributes);
   const spanAttributes: JsonObject = {
     'agent_loop_snapshot.source': 'otel-import',
     'agent_loop_snapshot.completeness': state.completeness,
   };
-  if (state.policy === 'redacted-content' && attributesValue !== undefined) {
+  if (state.policy === 'redacted-content' && payload.attributes !== undefined) {
     Object.assign(
       spanAttributes,
       contentAttribute(
         state,
         'agent_loop_snapshot.attributes',
-        attributesValue,
+        payload.attributes,
         `/events/${event.event_id}/payload/attributes`,
       ),
     );
-  } else if (attributesValue !== undefined) {
+  } else if (payload.attributes !== undefined) {
     state.droppedFieldCount += 1;
     loss(
       state,
@@ -434,23 +678,32 @@ function importedSpanFrom(
       'Imported span attributes were omitted by metadata-only policy.',
     );
   }
+  if (payload.resource !== undefined || payload.scope !== undefined) {
+    loss(
+      state,
+      'metadata_filtered',
+      'Imported resource and scope metadata were replaced by the configured outbound identity.',
+    );
+  }
   const sourceEvents = Array.isArray(payload.events) ? payload.events : [];
-  const events = sourceEvents.flatMap((item, index) => {
-    const value = asJsonValue(item);
-    if (value === undefined || state.policy === 'metadata-only') return [];
-    return [
-      {
+  const events: JsonObject[] = [];
+  if (state.policy === 'redacted-content') {
+    const count = Math.min(sourceEvents.length, state.limits.maxEventsPerSpan);
+    if (sourceEvents.length > count)
+      loss(state, 'limit_exceeded', 'Imported events exceeded the outbound item limit.');
+    for (let index = 0; index < count; index += 1) {
+      events.push({
         name: 'agent_loop_snapshot.imported_event',
         time_unix_nano: nano(event.timestamp),
         attributes: contentAttribute(
           state,
           'agent_loop_snapshot.event',
-          value,
+          sourceEvents[index],
           `/events/${event.event_id}/payload/events/${String(index)}`,
         ),
-      },
-    ];
-  });
+      });
+    }
+  }
   const links = Array.isArray(payload.links)
     ? payload.links.flatMap((item) => {
         if (!isRecord(item) || !isValidId(item.traceId, 32) || !isValidId(item.spanId, 16))
@@ -477,8 +730,6 @@ function importedSpanFrom(
     attributes: spanAttributes,
     events,
     links,
-    ...(isRecord(resource) ? { resource } : {}),
-    ...(isRecord(scope) ? { scope } : {}),
   };
 }
 
@@ -488,32 +739,34 @@ function mapImported(snapshot: ExportSnapshotInput, state: MapState): ExportSpan
     'observation_only_preserved',
     'OTLP-imported snapshots remain observation-only after export.',
   );
-  return snapshot.events
-    .filter((event) => event.type === 'otel.span')
-    .sort((left, right) => left.sequence - right.sequence)
-    .flatMap((event) => {
-      const span = importedSpanFrom(event, state);
-      return span === undefined ? [] : [span];
-    });
+  const candidates: EventEnvelope<string, unknown>[] = [];
+  let omitted = false;
+  for (const event of snapshot.events) {
+    if (event.type !== 'otel.span') continue;
+    if (candidates.length >= state.limits.maxSpans) {
+      omitted = true;
+      continue;
+    }
+    candidates.push(event);
+  }
+  candidates.sort((left, right) => left.sequence - right.sequence);
+  if (omitted) {
+    loss(state, 'request_truncated', 'Imported spans exceeded the outbound span limit.');
+  }
+  return candidates.flatMap((event) => {
+    const span = importedSpanFrom(event, state);
+    return span === undefined ? [] : [span];
+  });
 }
 
-function resourceFor(span: ExportSpan, serviceName: string): JsonObject {
-  const resource = span.resource;
-  if (!isRecord(resource)) return { 'service.name': serviceName };
-  const nested = resource.attributes;
-  if (!isRecord(nested)) return { 'service.name': serviceName };
-  const name = typeof nested['service.name'] === 'string' ? nested['service.name'] : serviceName;
-  return { 'service.name': name };
+function resourceFor(serviceName: string): JsonObject {
+  return { 'service.name': `agent-loop-snapshot-${stableHex(`service:${serviceName}`, 8)}` };
 }
 
-function scopeFor(span: ExportSpan): { name?: string; version?: string } {
-  if (!isRecord(span.scope))
-    return { name: '@agent-loop-snapshot/otel-export', version: otelExportContractVersion };
+function scopeFor(): { name?: string; version?: string } {
   return {
-    ...(typeof span.scope.name === 'string'
-      ? { name: span.scope.name }
-      : { name: '@agent-loop-snapshot/otel-export' }),
-    ...(typeof span.scope.version === 'string' ? { version: span.scope.version } : {}),
+    name: '@agent-loop-snapshot/otel-export',
+    version: otelExportContractVersion,
   };
 }
 
@@ -524,7 +777,7 @@ function toOtlpSpan(span: ExportSpan): OtlpTraceSpan {
     name: typeof event.name === 'string' ? event.name : 'agent_loop_snapshot.event',
     ...(isRecord(event.attributes) ? { attributes: attributes(event.attributes) } : {}),
   }));
-  const statusCode = span.status === 'OK' ? 2 : span.status === 'ERROR' ? 3 : 0;
+  const statusCode = span.status === 'OK' ? 1 : span.status === 'ERROR' ? 2 : 0;
   return {
     traceId: span.traceId,
     spanId: span.spanId,
@@ -559,8 +812,8 @@ function toRequest(
     { resource: JsonObject; scope: { name?: string; version?: string }; spans: ExportSpan[] }
   >();
   for (const span of spans) {
-    const resource = resourceFor(span, serviceName);
-    const scope = scopeFor(span);
+    const resource = resourceFor(serviceName);
+    const scope = scopeFor();
     const key = JSON.stringify([resource, scope]);
     const group = groups.get(key) ?? { resource, scope, spans: [] };
     group.spans.push(span);
@@ -573,23 +826,111 @@ function toRequest(
   return { resourceSpans };
 }
 
+function encodedBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), 'utf8');
+}
+
+function boundedAttributes(attributesValue: JsonObject, state: MapState): JsonObject {
+  const entries = Object.entries(attributesValue).sort(([left], [right]) =>
+    left.localeCompare(right),
+  );
+  if (entries.length <= state.limits.maxAttributesPerSpan) return attributesValue;
+  loss(state, 'limit_exceeded', 'Span attributes exceeded the outbound item limit.');
+  return Object.fromEntries(entries.slice(0, state.limits.maxAttributesPerSpan)) as JsonObject;
+}
+
+function boundedSpan(span: ExportSpan, state: MapState): ExportSpan | undefined {
+  const events = span.events.slice(0, state.limits.maxEventsPerSpan).map((event) => ({
+    ...event,
+    ...(isRecord(event.attributes)
+      ? { attributes: boundedAttributes(event.attributes, state) }
+      : {}),
+  }));
+  const links = span.links.slice(0, state.limits.maxLinksPerSpan);
+  if (events.length < span.events.length || links.length < span.links.length) {
+    loss(state, 'limit_exceeded', 'Span events or links exceeded outbound item limits.');
+  }
+  let candidate: ExportSpan = {
+    ...span,
+    attributes: boundedAttributes(span.attributes, state),
+    events,
+    links,
+  };
+  while (encodedBytes(toOtlpSpan(candidate)) > state.limits.maxSpanBytes) {
+    if (candidate.events.length > 0) {
+      candidate = { ...candidate, events: candidate.events.slice(0, -1) };
+    } else if (candidate.links.length > 0) {
+      candidate = { ...candidate, links: candidate.links.slice(0, -1) };
+    } else {
+      const keys = Object.keys(candidate.attributes).sort();
+      const key = keys.at(-1);
+      if (key === undefined) {
+        loss(
+          state,
+          'span_rejected',
+          'A span could not fit the outbound byte limit and was omitted.',
+        );
+        return undefined;
+      }
+      const attributesValue: JsonObject = { ...candidate.attributes };
+      delete attributesValue[key];
+      candidate = { ...candidate, attributes: attributesValue };
+    }
+    loss(state, 'limit_exceeded', 'A span was reduced to fit the outbound byte limit.');
+  }
+  return candidate;
+}
+
+function boundedRequest(
+  spans: readonly ExportSpan[],
+  serviceName: string,
+  state: MapState,
+): { readonly spans: readonly ExportSpan[]; readonly request: OtlpExportTraceServiceRequest } {
+  const accepted = spans.flatMap((span) => {
+    const bounded = boundedSpan(span, state);
+    return bounded === undefined ? [] : [bounded];
+  });
+  while (accepted.length > 0) {
+    const request = toRequest(accepted, serviceName);
+    if (encodedBytes(request) <= state.limits.maxRequestBytes) return { spans: accepted, request };
+    accepted.pop();
+    loss(
+      state,
+      'request_truncated',
+      'A span was omitted because the OTLP request byte limit was reached.',
+    );
+  }
+  return { spans: accepted, request: toRequest(accepted, serviceName) };
+}
+
 /** Maps an in-memory snapshot without reading files, using the configured content policy. */
 export function mapSnapshotToOtlp(
   snapshot: ExportSnapshotInput,
   options: OtelExportMappingOptions = {},
 ): OtelExportMappingResult {
   const source = sourceFor(snapshot);
+  const baselineRedaction = createDefaultOutboundRedactionPipeline();
   const state: MapState = {
     source,
     completeness: completenessFor(snapshot),
     limitations: snapshot.manifest.limitations ?? [],
     policy: options.contentPolicy ?? 'metadata-only',
-    redaction: options.redaction ?? createDefaultOutboundRedactionPipeline(),
+    redaction:
+      options.redaction === undefined
+        ? baselineRedaction
+        : {
+            redact(value, path) {
+              return options.redaction!.redact(baselineRedaction.redact(value, path), path);
+            },
+          },
+    limits: mappingLimits(options.limits),
     losses: [],
     droppedFieldCount: 0,
   };
-  const spans =
+  const mappedSpans =
     source === 'otel-import' ? mapImported(snapshot, state) : mapNativeOrSdk(snapshot, state);
+  const bounded = boundedRequest(mappedSpans, options.serviceName ?? 'agent-loop-snapshot', state);
+  const spans = bounded.spans;
   const traceId = spans[0]?.traceId ?? stableHex(`trace:${snapshot.manifest.run_id}`, 16);
   const report: ExportMappingReport = {
     contractVersion: otelExportContractVersion,
@@ -602,7 +943,7 @@ export function mapSnapshotToOtlp(
     limitations: state.limitations,
     observationOnly: source === 'otel-import',
   };
-  return { request: toRequest(spans, options.serviceName ?? 'agent-loop-snapshot'), spans, report };
+  return { request: bounded.request, spans, report };
 }
 
 /** Produces the exact filtered OTLP request and report without queueing or networking. */

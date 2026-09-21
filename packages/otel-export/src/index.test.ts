@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
-import { access, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import test from 'node:test';
 
 import type { EventEnvelope } from '@agent-loop-snapshot/schema';
@@ -20,6 +20,7 @@ import {
 } from './index.js';
 
 const emptyRequest = { resourceSpans: [] };
+const schemaFixtures = resolve(import.meta.dirname, '../../schema/fixtures');
 type ServerHandler = (request: IncomingMessage, response: ServerResponse) => void;
 
 function acceptedClient(calls: { count: number }) {
@@ -324,6 +325,155 @@ test('maps paired native calls without leaking metadata-only content', () => {
   assert.ok(mapping.report.losses.some((item) => item.code === 'content_filtered'));
 });
 
+test('exports every retry attempt with correct OTLP wire status codes', async () => {
+  const directory = join(schemaFixtures, 'tool-failure-retry');
+  const manifest = JSON.parse(await readFile(join(directory, 'manifest.json'), 'utf8')) as {
+    run_id: `run_${string}`;
+    terminal_status: 'completed';
+  };
+  const events = (await readFile(join(directory, 'events.jsonl'), 'utf8'))
+    .trim()
+    .split(/\r?\n/u)
+    .map((line) => JSON.parse(line) as EventEnvelope<string, unknown>);
+
+  const mapping = mapSnapshotToOtlp({
+    manifest: {
+      run_id: manifest.run_id,
+      source: 'native',
+      completeness: 'complete',
+      terminal_status: manifest.terminal_status,
+    },
+    events,
+  });
+  const attempts = mapping.spans.filter((span) => span.name === 'tool.call');
+  assert.equal(attempts.length, 2);
+  assert.deepEqual(
+    attempts.map((span) => span.status),
+    ['ERROR', 'OK'],
+  );
+  assert.notEqual(attempts[0]?.spanId, attempts[1]?.spanId);
+  assert.equal(attempts[0]?.startTimeUnixNano, '1788660060500000000');
+  assert.equal(attempts[1]?.startTimeUnixNano, '1788660061500000000');
+
+  const encodedAttempts = mapping.request.resourceSpans.flatMap((resource) =>
+    resource.scopeSpans.flatMap((scope) => scope.spans.filter((span) => span.name === 'tool.call')),
+  );
+  assert.deepEqual(
+    encodedAttempts.map((span) => span.status.code),
+    [2, 1],
+  );
+  assert.deepEqual(
+    mapping,
+    mapSnapshotToOtlp({
+      manifest: {
+        run_id: manifest.run_id,
+        source: 'native',
+        completeness: 'complete',
+        terminal_status: manifest.terminal_status,
+      },
+      events,
+    }),
+  );
+});
+
+test('keeps calls with a shared correlation key separate across call types', () => {
+  const mapping = mapSnapshotToOtlp({
+    manifest: {
+      run_id: 'run_test',
+      source: 'native',
+      completeness: 'complete',
+      terminal_status: 'completed',
+    },
+    events: [
+      event(1, 'run.started', {}),
+      event(2, 'model.requested', {
+        correlation_key: 'shared',
+        model: 'model',
+        input: {},
+      }),
+      event(3, 'tool.requested', {
+        correlation_key: 'shared',
+        tool: 'tool',
+        arguments: {},
+      }),
+      event(4, 'model.completed', { correlation_key: 'shared', output: {} }, ['evt_2']),
+      event(5, 'tool.completed', { correlation_key: 'shared', output: {} }, ['evt_3']),
+    ],
+  });
+
+  const calls = mapping.spans.filter((span) => span.name.endsWith('.call'));
+  assert.equal(calls.length, 2);
+  assert.deepEqual(
+    calls.map((span) => [span.name, span.status]),
+    [
+      ['model.call', 'OK'],
+      ['tool.call', 'OK'],
+    ],
+  );
+  assert.notEqual(calls[0]?.spanId, calls[1]?.spanId);
+});
+
+test('records an explicit diagnostic when a legacy finish has ambiguous call pairing', () => {
+  const mapping = mapSnapshotToOtlp({
+    manifest: {
+      run_id: 'run_test',
+      source: 'native',
+      completeness: 'complete',
+      terminal_status: 'completed',
+    },
+    events: [
+      event(1, 'run.started', {}),
+      event(2, 'tool.requested', {
+        correlation_key: 'shared',
+        tool: 'first',
+        arguments: {},
+      }),
+      event(3, 'tool.requested', {
+        correlation_key: 'shared',
+        tool: 'second',
+        arguments: {},
+      }),
+      event(4, 'tool.completed', { correlation_key: 'shared', output: {} }, []),
+    ],
+  });
+
+  assert.ok(mapping.report.losses.some((item) => item.code === 'ambiguous_call_finish'));
+  assert.deepEqual(
+    mapping.spans.filter((span) => span.name === 'tool.call').map((span) => span.status),
+    ['OK', 'UNSET'],
+  );
+});
+
+test('pairs a terminal event through a deep causal history without recursion', () => {
+  const depth = 4_000;
+  const chain = Array.from({ length: depth }, (_, index) => ({
+    ...event(index + 3, 'checkpoint.created', {}, [
+      index === 0 ? 'evt_2' : `chain_${String(index - 1)}`,
+    ]),
+    event_id: `chain_${String(index)}` as `evt_${string}`,
+  }));
+  const mapping = mapSnapshotToOtlp({
+    manifest: {
+      run_id: 'run_test',
+      source: 'native',
+      completeness: 'complete',
+      terminal_status: 'completed',
+    },
+    events: [
+      event(1, 'run.started', {}),
+      event(2, 'tool.requested', { correlation_key: 'deep', tool: 'lookup', arguments: {} }),
+      ...chain,
+      event(depth + 3, 'tool.completed', { correlation_key: 'deep', output: {} }, [
+        `chain_${String(depth - 1)}`,
+      ]),
+    ],
+  });
+
+  const call = mapping.spans.find((span) => span.name === 'tool.call');
+  assert.equal(call?.status, 'OK');
+  assert.ok(call?.endTimeUnixNano !== undefined);
+});
+
 test('redacted-content applies out-bound redaction before constructing OTLP JSON', () => {
   const mapping = mapSnapshotToOtlp(
     {
@@ -351,6 +501,140 @@ test('redacted-content applies out-bound redaction before constructing OTLP JSON
   assert.match(body, /REDACTED/);
 });
 
+test('filters free-text metadata before the dry-run request and report', () => {
+  const secret = 'Bearer test-secret-token-123456789';
+  const mapping = dryRunOtlpExport(
+    {
+      manifest: {
+        run_id: 'run_import',
+        source: 'otel-import',
+        completeness: 'complete',
+        terminal_status: 'completed',
+      },
+      events: [
+        event(1, 'otel.span', {
+          trace_id: '11111111111111111111111111111111',
+          span_id: '2222222222222222',
+          status: 'error',
+          resource: { attributes: { 'service.name': secret } },
+          scope: { name: secret, version: secret },
+          attributes: { api_key: secret, correlation_key: secret },
+          events: [],
+          links: [],
+        }),
+      ],
+    },
+    { contentPolicy: 'redacted-content', serviceName: secret },
+  );
+
+  const outbound = JSON.stringify(mapping);
+  assert.doesNotMatch(outbound, /test-secret-token-123456789/);
+  assert.doesNotMatch(outbound, /"correlation_key":/u);
+  assert.ok(mapping.mapping.report.losses.some((item) => item.code === 'metadata_filtered'));
+  assert.match(outbound, /agent-loop-snapshot-[0-9a-f]{16}/u);
+});
+
+test('applies bounded content, span, and request limits before returning OTLP JSON', () => {
+  const circular: Record<string, unknown> = { text: '😀'.repeat(100), items: [1, 2, 3, 4] };
+  circular.self = circular;
+  const mapping = mapSnapshotToOtlp(
+    {
+      manifest: {
+        run_id: 'run_test',
+        source: 'native',
+        completeness: 'complete',
+        terminal_status: 'completed',
+      },
+      events: [
+        event(1, 'run.started', {}),
+        event(2, 'tool.requested', {
+          correlation_key: 'capacity-test',
+          tool: 'lookup',
+          arguments: circular,
+        }),
+        event(3, 'checkpoint.created', { first: circular }),
+        event(4, 'checkpoint.created', { second: circular }),
+        event(5, 'tool.completed', { correlation_key: 'capacity-test', output: circular }, [
+          'evt_2',
+        ]),
+      ],
+    },
+    {
+      contentPolicy: 'redacted-content',
+      limits: {
+        maxStringBytes: 12,
+        maxCollectionItems: 2,
+        maxContentDepth: 3,
+        maxAttributesPerSpan: 2,
+        maxEventsPerSpan: 1,
+        maxLinksPerSpan: 1,
+        maxSpanBytes: 800,
+        maxRequestBytes: 1_200,
+      },
+    },
+  );
+
+  assert.ok(Buffer.byteLength(JSON.stringify(mapping.request), 'utf8') <= 1_200);
+  assert.ok(mapping.spans.every((span) => Buffer.byteLength(JSON.stringify(span), 'utf8') <= 800));
+  assert.ok(mapping.report.losses.some((item) => item.code === 'value_truncated'));
+  assert.ok(mapping.report.losses.some((item) => item.code === 'limit_exceeded'));
+});
+
+test('uses the same mapping limits before queueing an exporter request', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'alsnap-otlp-filtered-queue-'));
+  const secret = 'do-not-persist-or-send-this-secret';
+  let received = '';
+  try {
+    await withServer(
+      (request, response) => {
+        request.setEncoding('utf8');
+        request.on('data', (chunk: string) => {
+          received += chunk;
+        });
+        request.on('end', () => response.end('{}'));
+      },
+      async (endpoint) => {
+        const exporter = createOtlpExporter({
+          targetAlias: 'fixture',
+          endpoint,
+          serviceName: secret,
+          contentPolicy: 'redacted-content',
+          mappingLimits: { maxStringBytes: 12, maxRequestBytes: 1_200 },
+          queueDir: root,
+        });
+        assert.equal(
+          (
+            await exporter.exportSnapshot({
+              manifest: {
+                run_id: 'run_test',
+                source: 'native',
+                completeness: 'complete',
+                terminal_status: 'completed',
+              },
+              events: [
+                event(1, 'run.started', {}),
+                event(2, 'tool.requested', {
+                  correlation_key: secret,
+                  tool: 'lookup',
+                  arguments: { api_key: secret, content: 'x'.repeat(100) },
+                }),
+                event(3, 'tool.completed', { correlation_key: secret, output: {} }, ['evt_2']),
+              ],
+            })
+          ).state,
+          'queued',
+        );
+        await exporter.shutdown();
+      },
+    );
+    assert.notEqual(received, '');
+    assert.doesNotMatch(received, /do-not-persist-or-send-this-secret/);
+    assert.ok(Buffer.byteLength(received, 'utf8') <= 1_200);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('converts additional snapshot parents into OTLP links without serializing siblings', () => {
   const mapping = mapSnapshotToOtlp({
     manifest: {
@@ -371,9 +655,7 @@ test('converts additional snapshot parents into OTLP links without serializing s
     ],
   });
 
-  const join = mapping.spans.find(
-    (span) => span.attributes['agent_loop_snapshot.correlation_key'] === 'join',
-  );
+  const join = mapping.spans.filter((span) => span.name === 'tool.call').at(-1);
   assert.equal(join?.links.length, 1);
   assert.ok(mapping.report.losses.some((item) => item.code === 'multiple_parents_collapsed'));
   assert.ok(mapping.report.losses.some((item) => item.code === 'unpaired_call'));
