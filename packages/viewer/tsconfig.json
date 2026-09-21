@@ -7,9 +7,10 @@
   },
   "references": [
     { "path": "../graph" },
-    { "path": "../trace" },
-    { "path": "../otel-export" },
-    { "path": "../viewer" }
+    { "path": "../otel-import" },
+    { "path": "../recorder" },
+    { "path": "../schema" },
+    { "path": "../trace" }
   ],
   "include": ["src"]
 }

@@ -310,6 +310,27 @@ function reliableState(delivery: ExportDeliveryReport): ReliableDeliveryState {
   }
 }
 
+function exportState(state: ReliableDeliveryState): ExportDeliveryReport['state'] {
+  switch (state) {
+    case 'accepted':
+    case 'accepted_with_warnings':
+      return 'accepted';
+    case 'partially_rejected':
+    case 'permanently_rejected':
+      return 'rejected';
+    case 'retry_scheduled':
+      return 'retryable';
+    case 'retry_exhausted':
+      return 'exhausted';
+    case 'unknown_delivery':
+      return 'unknown_delivery';
+    case 'pending':
+      return 'queued';
+    default:
+      return 'not_queued';
+  }
+}
+
 function deliveryIsFinal(state: ReliableDeliveryState): boolean {
   return (
     state === 'accepted' ||
@@ -457,18 +478,35 @@ class PersistentQueue implements OtlpPersistentQueue {
         if (bytes > this.maxEntryBytes) {
           return this.notQueued('The export batch exceeds the persistent queue entry limit.');
         }
-        if (
-          entries.entries.some(({ entry: existing }) => existing.batchId === batchId) ||
-          (await lstat(this.archivePath(batchId)).then(
-            (details) => details.isFile(),
-            () => false,
-          )) ||
-          usage.count >= this.maxEntries ||
-          usage.bytes + bytes > this.maxBytes
-        ) {
-          return this.notQueued(
-            'The persistent export queue is at capacity or already contains this batch.',
-          );
+        if (entries.entries.some(({ entry: existing }) => existing.batchId === batchId)) {
+          return {
+            state: 'queued',
+            reliableState: 'pending',
+            targetAlias: this.options.targetAlias,
+            batchId,
+            attempted: false,
+            acceptedSpanCount: 0,
+            rejectedSpanCount: 0,
+            attempts: 0,
+            message: 'The export batch is already durably queued.',
+          };
+        }
+        const archived = await readJson(this.archivePath(batchId), this.maxEntryBytes);
+        if (isArchive(archived)) {
+          return {
+            state: exportState(archived.finalState),
+            reliableState: archived.finalState,
+            targetAlias: this.options.targetAlias,
+            batchId,
+            attempted: false,
+            acceptedSpanCount: archived.acceptedSpanCount,
+            rejectedSpanCount: archived.rejectedSpanCount,
+            attempts: archived.attempts,
+            message: 'The export batch already has a durable terminal receipt.',
+          };
+        }
+        if (usage.count >= this.maxEntries || usage.bytes + bytes > this.maxBytes) {
+          return this.notQueued('The persistent export queue is at capacity.');
         }
         try {
           await atomicWrite(this.entryPath(batchId), this.temporaryDirectory, entry);

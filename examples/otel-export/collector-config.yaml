@@ -1,5 +1,6 @@
-# Validated by `pnpm run collector:verify` with
-# otel/opentelemetry-collector-contrib:0.114.0.
+# Used by `pnpm run collector:verify` with the pinned Linux amd64 image
+# otel/opentelemetry-collector-contrib:0.114.0@sha256:43168fa5acb6989f40e8a2493275e30a62df8ee3f3dde1ba15c906cb8c9f3fb9.
+# This inspectable test path has no processors, credentials, or cloud exporter.
 receivers:
   otlp:
     protocols:

@@ -147,7 +147,7 @@ import { dirname, join } from 'node:path';\n
 import { runCli } from '@agent-loop-snapshot/cli';\n
 import { instrument } from '@agent-loop-snapshot/instrumentation';\n
 import { openAIIntegration } from '@agent-loop-snapshot/instrumentation-openai';\n
-import { dryRunOtlpExport } from '@agent-loop-snapshot/otel-export';\n
+import { createOtlpExporter, dryRunOtlpExport } from '@agent-loop-snapshot/otel-export';\n
 const [fixture, output] = process.argv.slice(2);\n
 if (fixture === undefined || output === undefined) {\n  throw new Error('Fixture and output paths are required.');\n}\n
 const io = { stdout: () => undefined, stderr: () => undefined };\n
@@ -158,6 +158,28 @@ void openAIIntegration({ recording: 'metadata-only' });\n
 const exportPreview = dryRunOtlpExport({ manifest: { run_id: 'release-smoke-export' }, events: [] });\n
 if (exportPreview.delivery.state !== 'dry_run') {\n
   throw new Error('Packed OTLP export dry-run did not return dry_run.');\n
+}\n
+const exporter = createOtlpExporter({\n
+  targetAlias: 'release-smoke',\n
+  endpoint: 'http://127.0.0.1:4318/v1/traces',\n
+  serviceName: 'release-smoke',\n
+  queueDir: join(dirname(output), 'export-queue'),\n
+  queueMaxBytes: 1,\n
+});\n
+const blockedExport = await exporter.exportSnapshot({\n
+  manifest: { run_id: 'release-smoke-export', source: 'native', completeness: 'complete', terminal_status: 'completed' },\n
+  events: [],\n
+});\n
+if (blockedExport.state !== 'not_sent' || blockedExport.batches.length !== 1) {\n
+  throw new Error('Packed OTLP exporter did not persist a recoverable delivery intent.');\n
+}\n
+const exportConfig = join(dirname(output), 'export.json');\n
+await writeFile(exportConfig, JSON.stringify({\n
+  targetAlias: 'release-smoke', endpoint: 'http://127.0.0.1:4318/v1/traces',\n
+  serviceName: 'release-smoke', queueDir: join(dirname(output), 'cli-export-queue'),\n
+}));\n
+if (await runCli(['export-otel', fixture, '--config', exportConfig, '--dry-run', '--json'], io) !== 0) {\n
+  throw new Error('Installed CLI OTLP dry-run failed.');\n
 }\n
 const otlpInput = join(dirname(output), 'trace.json');\n
 await mkdir(dirname(output), { recursive: true });\n
@@ -180,7 +202,7 @@ if (results.some((result) => result !== 0)) {\n  throw new Error(\`Installed CLI
       consumer,
     );
     console.log(
-      'Release smoke passed: packed packages installed cleanly, then generic instrumentation, SDK integration loading, OTLP import, validate, graph, and Mock Replay completed.',
+      'Release smoke passed: packed packages installed cleanly, then generic instrumentation, SDK integration loading, durable OTLP intent/dry-run, OTLP import, validate, graph, and Mock Replay completed.',
     );
   } finally {
     await rm(output, { recursive: true, force: true });

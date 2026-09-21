@@ -44,6 +44,7 @@ The CLI command is `alsnap`:
 npx alsnap --help
 npx alsnap validate ./runs/run-123
 npx alsnap inspect ./runs/run-123 --json
+npx alsnap view ./runs/run-123
 ```
 
 Install lower-level packages as needed:
@@ -268,7 +269,7 @@ pnpm run benchmark:als-502
 pnpm run release:verify # Quality gate, packaging, and consumer smoke test
 ```
 
-CI runs `pnpm run check`. Real OpenTelemetry Collector end-to-end verification requires Docker and can be run with `pnpm run collector:verify`.
+CI runs `pnpm run check`. Real OpenTelemetry Collector end-to-end verification requires Docker and can be run with `pnpm run collector:verify`. It uses a digest-pinned image and decodes the Collector file-exporter output rather than treating HTTP 200 as proof of delivery.
 
 ## Documentation
 
@@ -276,6 +277,7 @@ CI runs `pnpm run check`. Real OpenTelemetry Collector end-to-end verification r
 - [Workflow IR v0.1](https://github.com/SinglePoi/agent-loop-snapshot/blob/dev/docs/workflow-ir-v0.1.md)
 - [Schema compatibility and migration](https://github.com/SinglePoi/agent-loop-snapshot/blob/dev/docs/schema-compatibility.md)
 - [OTLP export and platform integration](https://github.com/SinglePoi/agent-loop-snapshot/blob/dev/docs/otel-export.md)
+- [Local Viewer](https://github.com/SinglePoi/agent-loop-snapshot/blob/dev/docs/local-viewer.md)
 - [Security and release guide](https://github.com/SinglePoi/agent-loop-snapshot/blob/dev/docs/security-and-release.md)
 - [Implementation plan](https://github.com/SinglePoi/agent-loop-snapshot/blob/dev/docs/implementation-plan.md)
 - [Changelog](CHANGELOG.md)

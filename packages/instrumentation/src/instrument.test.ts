@@ -70,6 +70,115 @@ test('queues a committed generic snapshot asynchronously and flushes it on shutd
   });
 });
 
+test('waits for durable exporter registration but preserves the business result', async () => {
+  await withAgent(async (directory) => {
+    let release: (() => void) | undefined;
+    let markStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const registered = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const exporter: OtlpExporter = {
+      contractVersion: 'otel-export-1.0',
+      async exportSnapshot() {
+        markStarted?.();
+        await registered;
+        return {
+          state: 'queued',
+          targetAlias: 'fixture',
+          attempted: false,
+          acceptedSpanCount: 0,
+          rejectedSpanCount: 0,
+          attempts: 0,
+        };
+      },
+      async flush() {
+        return {
+          contractVersion: 'otel-export-1.0',
+          deliveries: [],
+          pendingCount: 0,
+          deadlineExceeded: false,
+        };
+      },
+      async shutdown() {
+        return {
+          contractVersion: 'otel-export-1.0',
+          deliveries: [],
+          pendingCount: 0,
+          deadlineExceeded: false,
+        };
+      },
+    };
+    const agent = instrument({
+      snapshotDir: directory,
+      runtime: { name: 'generic-fixture', version: '1.0.0' },
+      model: { name: 'fixture-model', call: async () => 'ok' },
+      tools: {},
+      exporters: [exporter],
+    });
+    const running = agent.run({ input: {} }, ({ model }) => model.call());
+    await started;
+    let settled = false;
+    void running.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    assert.equal(settled, false);
+    release?.();
+    assert.equal(await running, 'ok');
+    await agent.shutdown();
+  });
+});
+
+test('does not shut down a shared generic exporter', async () => {
+  await withAgent(async (directory) => {
+    let shutdowns = 0;
+    const exporter: OtlpExporter = {
+      contractVersion: 'otel-export-1.0',
+      async exportSnapshot() {
+        return {
+          state: 'queued',
+          targetAlias: 'fixture',
+          attempted: false,
+          acceptedSpanCount: 0,
+          rejectedSpanCount: 0,
+          attempts: 0,
+        };
+      },
+      async flush() {
+        return {
+          contractVersion: 'otel-export-1.0',
+          deliveries: [],
+          pendingCount: 0,
+          deadlineExceeded: false,
+        };
+      },
+      async shutdown() {
+        shutdowns += 1;
+        return {
+          contractVersion: 'otel-export-1.0',
+          deliveries: [],
+          pendingCount: 0,
+          deadlineExceeded: false,
+        };
+      },
+    };
+    const agent = instrument({
+      snapshotDir: directory,
+      runtime: { name: 'generic-fixture', version: '1.0.0' },
+      model: { name: 'fixture-model', call: async () => 'ok' },
+      tools: {},
+      exporters: [exporter],
+      exporterOwnership: 'shared',
+    });
+    await agent.run({ input: {} }, ({ model }) => model.call());
+    await agent.shutdown();
+    assert.equal(shutdowns, 0);
+  });
+});
+
 test('reports incomplete generic exporter flushes without altering business results', async () => {
   await withAgent(async (directory) => {
     const diagnostics: string[] = [];

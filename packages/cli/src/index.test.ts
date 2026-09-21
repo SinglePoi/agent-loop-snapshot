@@ -157,10 +157,65 @@ test('export-otel sends a local snapshot through its configured queue', async ()
       flush: { pendingCount: number; deliveries: Array<{ state: string }> };
     };
     assert.equal(output.valid, true);
-    assert.equal(output.queued.state, 'queued');
+    assert.equal(output.queued.state, 'pending');
     assert.equal(output.flush.pendingCount, 0);
     assert.ok(output.flush.deliveries.length > 0);
     assert.ok(output.flush.deliveries.every((delivery) => delivery.state === 'accepted'));
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('export-otel resume only recovers intent from its configured queue', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'alsnap-export-resume-cli-'));
+  let requests = 0;
+  const server = createServer((request, response) => {
+    requests += 1;
+    request.resume();
+    response.end('{}');
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  assert.ok(address !== null && typeof address !== 'string');
+  try {
+    const config = join(root, 'export.json');
+    const base = {
+      targetAlias: 'fixture',
+      endpoint: `http://127.0.0.1:${String(address.port)}/v1/traces`,
+      serviceName: 'cli-fixture',
+      queueDir: join(root, 'queue'),
+    };
+    await writeFile(config, JSON.stringify({ ...base, queueMaxBytes: 1 }));
+    assert.equal(
+      await runCli(['export-otel', fixtureDirectory, '--config', config, '--json'], captureIo().io),
+      cliExitCodes.runtimeError,
+    );
+    assert.equal(requests, 0);
+
+    await writeFile(config, JSON.stringify(base));
+    const captured = captureIo();
+    const exitCode = await runCli(
+      ['export-otel', '--resume', '--config', config, '--json'],
+      captured.io,
+    );
+    assert.equal(exitCode, cliExitCodes.success);
+    const output = JSON.parse(captured.stdout.join('')) as {
+      resumed: boolean;
+      deliveries: Array<{ batches: unknown[] }>;
+      valid: boolean;
+    };
+    assert.equal(output.resumed, true);
+    assert.equal(output.valid, true);
+    assert.equal(output.deliveries.length, 1);
+    assert.ok((output.deliveries[0]?.batches.length ?? 0) > 0);
+    assert.equal(requests, 1);
   } finally {
     server.closeAllConnections();
     await new Promise<void>((resolve, reject) =>

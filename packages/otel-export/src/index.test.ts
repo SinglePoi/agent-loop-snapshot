@@ -17,6 +17,7 @@ import {
   isExportEndpointConfigured,
   mapSnapshotToOtlp,
   otelExportContractVersion,
+  type ExportSnapshotInput,
 } from './index.js';
 
 const emptyRequest = { resourceSpans: [] };
@@ -137,7 +138,9 @@ test('queues committed snapshots and splits their OTLP spans before automatic de
             event(3, 'model.completed', { correlation_key: 'one', output: {} }, ['evt_2']),
           ],
         });
-        assert.equal(queued.state, 'queued');
+        assert.equal(queued.state, 'pending');
+        assert.equal(queued.batches.length, 2);
+        assert.equal(queued.pendingBatchCount, 2);
         const flush = await exporter.shutdown();
         assert.equal(flush.pendingCount, 0);
         assert.equal(flush.deliveries.length, 2);
@@ -182,7 +185,10 @@ test('flushes already queued batches when a later split batch cannot enter the q
             event(3, 'model.completed', { correlation_key: 'one', output: {} }, ['evt_2']),
           ],
         });
-        assert.equal(delivery.state, 'not_queued');
+        assert.equal(delivery.state, 'pending');
+        assert.equal(delivery.batches.length, 2);
+        assert.equal(delivery.batches.filter((batch) => batch.state === 'pending').length, 1);
+        assert.equal(delivery.batches.filter((batch) => batch.state === 'not_sent').length, 1);
 
         const flushed = await exporter.shutdown();
         assert.equal(flushed.pendingCount, 0);
@@ -192,6 +198,138 @@ test('flushes already queued batches when a later split batch cannot enter the q
     assert.equal(requests, 1);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('recovers a persisted export intent that could not enter the queue', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'alsnap-otlp-delivery-intent-'));
+  let requests = 0;
+  const snapshot: ExportSnapshotInput = {
+    manifest: {
+      run_id: 'run_test',
+      source: 'native' as const,
+      completeness: 'complete' as const,
+      terminal_status: 'completed' as const,
+    },
+    events: [
+      event(1, 'run.started', {}),
+      event(2, 'model.requested', { correlation_key: 'one', model: 'test', input: {} }),
+      event(3, 'model.completed', { correlation_key: 'one', output: {} }, ['evt_2']),
+    ],
+  };
+  try {
+    await withServer(
+      (request, response) => {
+        requests += 1;
+        request.resume();
+        response.end('{}');
+      },
+      async (endpoint) => {
+        const blocked = createOtlpExporter({
+          targetAlias: 'fixture',
+          endpoint,
+          serviceName: 'test',
+          queueDir: root,
+          queueMaxBytes: 1,
+        });
+        const initial = await blocked.exportSnapshot(snapshot);
+        assert.equal(initial.state, 'not_sent');
+        assert.equal(initial.batches.length, 1);
+        assert.equal(initial.batches[0]?.state, 'not_sent');
+
+        const recovered = createOtlpExporter({
+          targetAlias: 'fixture',
+          endpoint,
+          serviceName: 'test',
+          queueDir: root,
+        });
+        const resumed = await recovered.resume();
+        assert.equal(resumed.length, 1);
+        assert.equal(resumed[0]?.state, 'pending');
+        const flushed = await recovered.shutdown();
+        assert.equal(flushed.pendingCount, 0);
+      },
+    );
+    assert.equal(requests, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+  }
+});
+
+test('diagnoses an encoded span that can never fit a durable batch', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'alsnap-otlp-oversized-span-'));
+  try {
+    const exporter = createOtlpExporter({
+      targetAlias: 'fixture',
+      endpoint: 'http://127.0.0.1:4318/v1/traces',
+      serviceName: 'test',
+      queueDir: root,
+      batchMaxBytes: 1,
+    });
+    const report = await exporter.exportSnapshot({
+      manifest: {
+        run_id: 'run_test',
+        source: 'native',
+        completeness: 'complete',
+        terminal_status: 'completed',
+      },
+      events: [event(1, 'run.started', {})],
+    });
+    assert.equal(report.state, 'not_sent');
+    assert.equal(report.batches.length, 0);
+    assert.equal(
+      report.diagnostics.find((diagnostic) => diagnostic.code === 'span_rejected')?.count,
+      1,
+    );
+    assert.equal((await exporter.flush()).pendingCount, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+  }
+});
+
+test('deduplicates a stable snapshot batch locally and stops accepting work after shutdown', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'alsnap-otlp-stable-batch-'));
+  let requests = 0;
+  const snapshot: ExportSnapshotInput = {
+    manifest: {
+      run_id: 'run_test',
+      source: 'native' as const,
+      completeness: 'complete' as const,
+      terminal_status: 'completed' as const,
+    },
+    events: [
+      event(1, 'run.started', {}),
+      event(2, 'tool.requested', { correlation_key: 'one', tool: 'lookup', arguments: {} }),
+      event(3, 'tool.completed', { correlation_key: 'one', output: {} }, ['evt_2']),
+    ],
+  };
+  try {
+    await withServer(
+      (request, response) => {
+        requests += 1;
+        request.resume();
+        response.end('{}');
+      },
+      async (endpoint) => {
+        const exporter = createOtlpExporter({
+          targetAlias: 'fixture',
+          endpoint,
+          serviceName: 'test',
+          queueDir: root,
+        });
+        const first = await exporter.exportSnapshot(snapshot);
+        const second = await exporter.exportSnapshot(snapshot);
+        assert.equal(first.batches[0]?.identity.batchId, second.batches[0]?.identity.batchId);
+        const firstShutdown = exporter.shutdown();
+        assert.equal(exporter.shutdown(), firstShutdown);
+        await firstShutdown;
+        const afterShutdown = await exporter.exportSnapshot(snapshot);
+        assert.equal(afterShutdown.state, 'not_sent');
+      },
+    );
+    assert.equal(requests, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
   }
 });
 
@@ -230,7 +368,7 @@ test('keeps bounded background delivery history for long-running exporters', asy
               event(1, 'otel.span', {
                 trace_id: '11111111111111111111111111111111',
                 span_id: '2222222222222222',
-                name: 'background-history',
+                name: `background-history-${String(index)}`,
                 status: 'unset',
                 start_time_unix_nano: '1000000000',
                 end_time_unix_nano: '2000000000',
@@ -242,7 +380,7 @@ test('keeps bounded background delivery history for long-running exporters', asy
               }),
             ],
           });
-          assert.equal(delivery.state, 'queued', delivery.message);
+          assert.equal(delivery.state, 'pending', JSON.stringify(delivery.diagnostics));
           await waitFor(
             async () =>
               (await inspector.inspect()).pendingCount === 0 &&
@@ -622,7 +760,7 @@ test('uses the same mapping limits before queueing an exporter request', async (
               ],
             })
           ).state,
-          'queued',
+          'pending',
         );
         await exporter.shutdown();
       },

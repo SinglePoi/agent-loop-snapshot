@@ -78,6 +78,54 @@ test('queues a committed SDK snapshot without changing the business result', asy
   }
 });
 
+test('registers a failed SDK run without replacing its business error', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'alsnap-instrumentation-export-failed-run-'));
+  const exported: string[] = [];
+  const exporter: OtlpExporter = {
+    contractVersion: 'otel-export-1.0',
+    async exportSnapshot(snapshot) {
+      exported.push(snapshot.manifest.terminal_status ?? 'unknown');
+      return {
+        state: 'queued',
+        targetAlias: 'fixture',
+        attempted: false,
+        acceptedSpanCount: 0,
+        rejectedSpanCount: 0,
+        attempts: 0,
+      };
+    },
+    async flush() {
+      return {
+        contractVersion: 'otel-export-1.0',
+        deliveries: [],
+        pendingCount: 0,
+        deadlineExceeded: false,
+      };
+    },
+    async shutdown() {
+      return {
+        contractVersion: 'otel-export-1.0',
+        deliveries: [],
+        pendingCount: 0,
+        deadlineExceeded: false,
+      };
+    },
+  };
+  const telemetry = initInstrumentation({ snapshotDir: directory, exporters: [exporter] });
+  try {
+    await assert.rejects(
+      telemetry.run({}, () => {
+        throw new Error('business failed');
+      }),
+      /business failed/u,
+    );
+    assert.deepEqual(exported, ['failed']);
+  } finally {
+    await telemetry.shutdown();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('reports incomplete SDK exporter shutdowns without changing business results', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'alsnap-instrumentation-export-failure-'));
   const diagnostics: string[] = [];

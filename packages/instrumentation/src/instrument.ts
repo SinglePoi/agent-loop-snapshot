@@ -20,7 +20,7 @@ import type {
   SideEffectLevel,
   SnapshotManifest,
 } from '@agent-loop-snapshot/schema';
-import type { ExporterFlushReport, OtlpExporter } from '@agent-loop-snapshot/otel-export';
+import type { OtlpExporter } from '@agent-loop-snapshot/otel-export';
 
 import {
   currentInstrumentationScope,
@@ -31,6 +31,7 @@ import {
   type InstrumentationRun,
   type InstrumentationScope,
 } from './context.js';
+import { ExportLifecycle, type ExporterOwnership } from './export-lifecycle.js';
 import { InstrumentationError, type InstrumentationDiagnostic } from './index.js';
 
 // `any` is restricted to this constraint: it lets TypeScript infer the actual
@@ -95,6 +96,12 @@ export interface InstrumentOptions<
   readonly drainTimeoutMs?: number;
   /** Exporters receive each committed root snapshot asynchronously. */
   readonly exporters?: readonly OtlpExporter[];
+  /** `owned` (default) shuts exporters down with this agent; `shared` never does. */
+  readonly exporterOwnership?: ExporterOwnership;
+  /** Bounded concurrent durable-registration operations. */
+  readonly maxConcurrentExports?: number;
+  /** Maximum registration operations awaiting a local durable acknowledgement. */
+  readonly maxPendingExports?: number;
   readonly onSnapshot?: (snapshot: InstrumentSnapshot) => void | Promise<void>;
   readonly onDiagnostic?: (diagnostic: InstrumentationDiagnostic) => void;
 }
@@ -204,21 +211,6 @@ function errorInfo(error: unknown, code: string, kind: ErrorInfo['kind']): Error
   };
 }
 
-function incompleteExportMessage(
-  action: 'flush' | 'shutdown',
-  report: ExporterFlushReport,
-): string | undefined {
-  const incomplete = report.deliveries.find((delivery) => delivery.state !== 'accepted');
-  if (incomplete !== undefined) {
-    return `OTLP export ${action} did not complete: ${incomplete.message ?? incomplete.state}.`;
-  }
-  if (report.deadlineExceeded) return `OTLP export ${action} exceeded its deadline.`;
-  if (report.pendingCount > 0) {
-    return `OTLP export ${action} left ${String(report.pendingCount)} batch(es) queued.`;
-  }
-  return undefined;
-}
-
 class Agent<
   TModel extends ModelDefinition<AsyncFunction>,
   TTools extends ToolDefinitions,
@@ -229,7 +221,7 @@ class Agent<
   private readonly redaction: RedactionPipelineOptions;
   private readonly onSnapshot: ((snapshot: InstrumentSnapshot) => void | Promise<void>) | undefined;
   private readonly onDiagnostic: ((diagnostic: InstrumentationDiagnostic) => void) | undefined;
-  private readonly exporters: readonly OtlpExporter[];
+  private readonly exportLifecycle: ExportLifecycle;
   private closed = false;
 
   constructor(private readonly options: InstrumentOptions<TModel, TTools>) {
@@ -239,7 +231,17 @@ class Agent<
     this.redaction = options.redaction ?? {};
     this.onSnapshot = options.onSnapshot;
     this.onDiagnostic = options.onDiagnostic;
-    this.exporters = [...new Set(options.exporters ?? [])];
+    this.exportLifecycle = new ExportLifecycle({
+      exporters: options.exporters ?? [],
+      ...(options.exporterOwnership === undefined ? {} : { ownership: options.exporterOwnership }),
+      ...(options.maxConcurrentExports === undefined
+        ? {}
+        : { maxConcurrentExports: options.maxConcurrentExports }),
+      ...(options.maxPendingExports === undefined
+        ? {}
+        : { maxPendingExports: options.maxPendingExports }),
+      report: (message) => this.report({ code: 'EXPORT_FAILED', message }),
+    });
   }
 
   async run<TInput extends JsonValue, TResult>(
@@ -330,7 +332,7 @@ class Agent<
         });
       }
       await active.writer.commit(active.recorder.getManifest(active.run));
-      this.scheduleExport(active);
+      await this.scheduleExport(active);
     } catch (recordingError) {
       this.report({
         code: 'RECORDING_FINALIZATION_FAILED',
@@ -368,39 +370,13 @@ class Agent<
   }
 
   async flushExporters(options: { readonly deadlineMs?: number } = {}): Promise<void> {
-    await Promise.all(
-      this.exporters.map(async (exporter) => {
-        try {
-          const report = await exporter.flush(options);
-          const incomplete = incompleteExportMessage('flush', report);
-          if (incomplete !== undefined) this.report({ code: 'EXPORT_FAILED', message: incomplete });
-        } catch (error) {
-          this.report({
-            code: 'EXPORT_FAILED',
-            message: `Could not flush OTLP export: ${message(error)}`,
-          });
-        }
-      }),
-    );
+    await this.exportLifecycle.flush(options);
   }
 
   async shutdown(options: { readonly deadlineMs?: number } = {}): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    await Promise.all(
-      this.exporters.map(async (exporter) => {
-        try {
-          const report = await exporter.shutdown(options);
-          const incomplete = incompleteExportMessage('shutdown', report);
-          if (incomplete !== undefined) this.report({ code: 'EXPORT_FAILED', message: incomplete });
-        } catch (error) {
-          this.report({
-            code: 'EXPORT_FAILED',
-            message: `Could not shut down OTLP export: ${message(error)}`,
-          });
-        }
-      }),
-    );
+    await this.exportLifecycle.shutdown(options);
   }
 
   private async runJoined<TResult>(
@@ -452,29 +428,11 @@ class Agent<
     return result as TResult;
   }
 
-  private scheduleExport(active: GenericRun): void {
-    for (const exporter of this.exporters) {
-      void exporter
-        .exportSnapshot({
-          manifest: active.recorder.getManifest(active.run),
-          events: active.recorder.getEvents(active.run),
-        })
-        .then((delivery) => {
-          if (delivery.state === 'not_queued') {
-            this.report({
-              code: 'EXPORT_FAILED',
-              message:
-                delivery.message ?? 'The committed snapshot could not be queued for OTLP export.',
-            });
-          }
-        })
-        .catch((error: unknown) => {
-          this.report({
-            code: 'EXPORT_FAILED',
-            message: `Could not queue committed snapshot for OTLP export: ${message(error)}`,
-          });
-        });
-    }
+  private async scheduleExport(active: GenericRun): Promise<void> {
+    await this.exportLifecycle.queueSnapshot({
+      manifest: active.recorder.getManifest(active.run),
+      events: active.recorder.getEvents(active.run),
+    });
   }
 
   private async startRun(input: JsonValue): Promise<GenericRun> {

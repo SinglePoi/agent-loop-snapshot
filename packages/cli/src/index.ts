@@ -38,6 +38,7 @@ import {
   isExportEndpointConfigured,
   type OtelExportConfig,
 } from '@agent-loop-snapshot/otel-export';
+import { startViewer } from '@agent-loop-snapshot/viewer';
 
 export const cliPackageName = '@agent-loop-snapshot/cli' as const;
 export const cliVersion = '0.1.2' as const;
@@ -48,7 +49,20 @@ export const cliExitCodes = {
   validationFailed: 2,
 } as const;
 
-type CommandName = 'validate' | 'inspect' | 'graph' | 'replay' | 'import-otel' | 'export-otel';
+function acceptedDelivery(delivery: {
+  readonly state: string;
+  readonly reliableState?: string;
+}): boolean {
+  return (
+    delivery.state === 'accepted' &&
+    (delivery.reliableState === undefined ||
+      delivery.reliableState === 'accepted' ||
+      delivery.reliableState === 'accepted_with_warnings')
+  );
+}
+
+type CommandName =
+  'validate' | 'inspect' | 'graph' | 'replay' | 'import-otel' | 'export-otel' | 'view';
 type OutputFormat = 'text' | 'json' | 'mermaid';
 type ReplayMode = 'mock';
 
@@ -187,7 +201,7 @@ function parseFormat(value: string): OutputFormat {
 function parseCommand(argv: readonly string[]): ParsedCommand {
   const commandValue = argv[0];
   if (commandValue === undefined || commandValue.startsWith('-')) {
-    throw new CliUsageError('A command is required: validate, inspect, graph, or replay.');
+    throw new CliUsageError('A command is required: validate, inspect, graph, replay, or view.');
   }
   if (
     commandValue !== 'validate' &&
@@ -195,7 +209,8 @@ function parseCommand(argv: readonly string[]): ParsedCommand {
     commandValue !== 'graph' &&
     commandValue !== 'replay' &&
     commandValue !== 'import-otel' &&
-    commandValue !== 'export-otel'
+    commandValue !== 'export-otel' &&
+    commandValue !== 'view'
   ) {
     throw new CliUsageError(`Unknown command "${commandValue}".`);
   }
@@ -365,6 +380,20 @@ function parseCommand(argv: readonly string[]): ParsedCommand {
       maxSequence !== undefined)
   ) {
     throw new CliUsageError('Graph filters and noise folding options are only supported by graph.');
+  }
+  if (
+    commandValue === 'view' &&
+    (format !== 'text' ||
+      graphKind !== 'causal-dag' ||
+      !foldNoise ||
+      Object.keys({ actor, type, status, minSequence, maxSequence }).some(
+        (key) =>
+          ({ actor, type, status, minSequence, maxSequence })[
+            key as 'actor' | 'type' | 'status' | 'minSequence' | 'maxSequence'
+          ] !== undefined,
+      ))
+  ) {
+    throw new CliUsageError('Viewer does not accept output or graph filter options.');
   }
   if (
     commandValue !== 'replay' &&
@@ -960,6 +989,14 @@ function usage(command?: CommandName): string {
       'Dry-run never resolves credentials, contacts the network, or writes a queue entry.',
     ].join('\n');
   }
+  if (command === 'view') {
+    return [
+      'Usage: alsnap view <snapshot-directory>',
+      '',
+      'Start a read-only local Viewer on 127.0.0.1 for the explicitly selected snapshot.',
+      'The command prints a session-token URL and remains running until interrupted.',
+    ].join('\n');
+  }
   return [
     'Agent Loop Snapshot CLI',
     '',
@@ -972,6 +1009,7 @@ function usage(command?: CommandName): string {
     '  replay    Create a mock replay snapshot from recorded results',
     '  import-otel  Import OTLP JSON as observation-only snapshots',
     '  export-otel  Export a snapshot or resume its configured OTLP queue',
+    '  view      Start the read-only local Snapshot Viewer',
     '',
     'Global options: --help, --version, --json',
   ].join('\n');
@@ -996,7 +1034,8 @@ export async function runCli(
       commandValue === 'graph' ||
       commandValue === 'replay' ||
       commandValue === 'import-otel' ||
-      commandValue === 'export-otel'
+      commandValue === 'export-otel' ||
+      commandValue === 'view'
         ? commandValue
         : undefined;
     io.stdout(`${usage(command)}\n`);
@@ -1021,6 +1060,11 @@ export async function runCli(
   }
 
   try {
+    if (command.name === 'view') {
+      const viewer = await startViewer({ snapshotDirectory: command.directory });
+      io.stdout(`Viewer (read-only, loopback only): ${viewer.url}\nPress Ctrl+C to stop.\n`);
+      return cliExitCodes.success;
+    }
     if (command.name === 'validate') {
       const result = await loadValidation(command.directory);
       if (command.format === 'json') {
@@ -1088,15 +1132,20 @@ export async function runCli(
         if (config.queueDir === undefined) {
           throw new CliUsageError('export-otel --resume requires queueDir in the export config.');
         }
-        const flush = await createOtlpExporter(config).flush();
+        const exporter = createOtlpExporter(config);
+        const resumed = await exporter.resume();
+        const flush = await exporter.flush();
         const valid =
+          resumed.some((delivery) => delivery.batches.length > 0) &&
           !flush.deadlineExceeded &&
           flush.pendingCount === 0 &&
-          flush.deliveries.every((delivery) => delivery.state === 'accepted');
+          flush.deliveries.length > 0 &&
+          flush.deliveries.every(acceptedDelivery);
         if (command.format === 'json') {
           writeJson(io, {
             command: command.name,
             resumed: true,
+            deliveries: resumed,
             target_alias: config.targetAlias,
             valid,
             flush,
@@ -1106,7 +1155,7 @@ export async function runCli(
           io.stdout(`Target: ${config.targetAlias}\n`);
           io.stdout(`Pending: ${String(flush.pendingCount)}\n`);
         }
-        return valid ? cliExitCodes.success : cliExitCodes.validationFailed;
+        return valid ? cliExitCodes.success : cliExitCodes.runtimeError;
       }
 
       const snapshot = await loadTraceSnapshot(command.directory);
@@ -1132,6 +1181,7 @@ export async function runCli(
         targetAlias: config.targetAlias,
       });
       if (command.dryRun) {
+        const valid = dryRun.mapping.report.spanCount > 0;
         if (command.format === 'json') {
           writeJson(io, {
             command: command.name,
@@ -1140,14 +1190,25 @@ export async function runCli(
             target_alias: config.targetAlias,
             delivery: dryRun.delivery,
             mapping: dryRun.mapping.report,
+            valid,
+            ...(valid
+              ? {}
+              : {
+                  diagnostics: [
+                    {
+                      code: 'NO_DATA',
+                      message: 'The source snapshot produced no exportable OTLP spans.',
+                    },
+                  ],
+                }),
           });
         } else {
-          io.stdout('DRY_RUN\n');
+          io.stdout(`${valid ? 'DRY_RUN' : 'NO_DATA'}\n`);
           io.stdout(`Target: ${config.targetAlias}\n`);
           io.stdout(`Spans: ${String(dryRun.mapping.report.spanCount)}\n`);
           io.stdout(`Dropped fields: ${String(dryRun.mapping.report.droppedFieldCount)}\n`);
         }
-        return cliExitCodes.success;
+        return valid ? cliExitCodes.success : cliExitCodes.runtimeError;
       }
       if (config.queueDir === undefined) {
         throw new CliUsageError('export-otel requires queueDir in the export config.');
@@ -1156,11 +1217,12 @@ export async function runCli(
       const queued = await exporter.exportSnapshot(exportInput);
       const flush = await exporter.flush();
       const valid =
-        queued.state === 'queued' &&
+        queued.batches.length > 0 &&
+        queued.state !== 'not_sent' &&
         !flush.deadlineExceeded &&
         flush.pendingCount === 0 &&
         flush.deliveries.length > 0 &&
-        flush.deliveries.every((delivery) => delivery.state === 'accepted');
+        flush.deliveries.every(acceptedDelivery);
       if (command.format === 'json') {
         writeJson(io, {
           command: command.name,
@@ -1176,7 +1238,7 @@ export async function runCli(
         io.stdout(`Target: ${config.targetAlias}\n`);
         io.stdout(`Pending: ${String(flush.pendingCount)}\n`);
       }
-      return valid ? cliExitCodes.success : cliExitCodes.validationFailed;
+      return valid ? cliExitCodes.success : cliExitCodes.runtimeError;
     }
 
     const snapshot = await loadTraceSnapshot(command.directory);

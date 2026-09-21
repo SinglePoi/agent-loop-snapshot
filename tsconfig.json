@@ -10,6 +10,7 @@
     { "path": "packages/otel-export" },
     { "path": "packages/trace" },
     { "path": "packages/graph" },
+    { "path": "packages/viewer" },
     { "path": "packages/replay" },
     { "path": "packages/cli" },
     { "path": "packages/example-runtime" }

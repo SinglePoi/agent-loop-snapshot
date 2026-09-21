@@ -55,6 +55,6 @@ pnpm install --frozen-lockfile
 pnpm run release:verify
 ```
 
-`release:verify` runs the quality gate, builds every package, checks the tarball contents, then creates fresh package tarballs and installs them into an automatically removed temporary consumer directory. The clean install may fetch external production dependencies from the configured registry; internal packages are always installed from the generated tarballs. That installed CLI validates the sanitized example snapshot, exports its Mermaid graph, and creates a Mock Replay snapshot.
+`release:verify` runs the quality gate, builds every package, checks the tarball contents, then creates fresh package tarballs and installs them into an automatically removed temporary consumer directory. The clean install may fetch external production dependencies from the configured registry; internal packages are always installed from the generated tarballs. That installed CLI validates the sanitized example snapshot, exports its Mermaid graph, creates a Mock Replay snapshot, and exercises the packed OTLP factory's recoverable delivery intent plus CLI OTLP dry-run. Run `pnpm run collector:verify` separately on a Docker-enabled machine; it is intentionally not folded into the offline quality gate.
 
 Before publishing, also review [CHANGELOG.md](../CHANGELOG.md), increment all package versions consistently, verify the generated tarballs contain only `dist/` plus required schemas/fixtures, and publish from CI using short-lived registry credentials. No release credential should be stored in this repository.

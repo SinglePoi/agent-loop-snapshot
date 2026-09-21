@@ -79,6 +79,8 @@ export interface OtelExportConfig {
   /** Optional bounded overrides shared by SDK, CLI, dry-run, and queue paths. */
   readonly mappingLimits?: Partial<OtelExportMappingLimits>;
   readonly timeoutMs?: number;
+  /** Maximum encoded OTLP/HTTP JSON bytes in one durable batch. */
+  readonly batchMaxBytes?: number;
   readonly batchSpanLimit?: number;
   readonly retryMaxAttempts?: number;
   readonly retryBudgetMs?: number;
@@ -259,6 +261,8 @@ export interface ExportBatchIdentity extends ExportDestinationIdentity {
   readonly queueVersion: OtlpPersistentQueueVersion;
   readonly contentPolicy: ExportContentPolicy;
   readonly encoding: 'otlp-http-json';
+  /** Hash of the resolved destination and non-secret delivery configuration. */
+  readonly targetFingerprint: string;
   readonly batchId: string;
 }
 
@@ -330,6 +334,8 @@ export interface ReliableExportDeliveryReport {
   readonly pendingBatchCount: number;
   readonly pendingSpanCount: number;
   readonly unknownDeliveryBatchCount: number;
+  /** Mapping or batching diagnostics that prevented a span from being queued. */
+  readonly diagnostics: readonly ExportMappingLoss[];
 }
 
 export interface OtlpPartialSuccess {
@@ -437,14 +443,39 @@ export interface OtlpPersistentQueue {
  * an HTTP client.
  */
 export interface OtlpExporter {
-  readonly contractVersion: OtelExportContractVersion;
-  readonly exportSnapshot: (snapshot: ExportSnapshotInput) => Promise<ExportDeliveryReport>;
+  /** v1 remains accepted while SDK/CLI consumers migrate to aggregate reports. */
+  readonly contractVersion: OtelExportContractVersion | OtelExportReliableDeliveryContractVersion;
+  /**
+   * Persist the snapshot's export intent before queue insertion. The result
+   * covers every resulting batch; a local `pending` acknowledgement is not a
+   * claim that the receiver accepted it.
+   */
+  readonly exportSnapshot: (
+    snapshot: ExportSnapshotInput,
+  ) => Promise<ExportDeliveryReport | ReliableExportDeliveryReport>;
+  /** Resume only intent records under this exporter's configured queue directory. */
+  readonly resume?: () => Promise<readonly ReliableExportDeliveryReport[]>;
+  readonly flush: (options?: { readonly deadlineMs?: number }) => Promise<ExporterFlushReport>;
+  readonly shutdown: (options?: { readonly deadlineMs?: number }) => Promise<ExporterFlushReport>;
+}
+
+/** The v2 factory result; it remains structurally usable where v1 exporters are accepted. */
+export interface ReliableOtlpExporter {
+  readonly contractVersion: OtelExportReliableDeliveryContractVersion;
+  readonly exportSnapshot: (snapshot: ExportSnapshotInput) => Promise<ReliableExportDeliveryReport>;
+  readonly resume: () => Promise<readonly ReliableExportDeliveryReport[]>;
   readonly flush: (options?: { readonly deadlineMs?: number }) => Promise<ExporterFlushReport>;
   readonly shutdown: (options?: { readonly deadlineMs?: number }) => Promise<ExporterFlushReport>;
 }
 
 export function isExportEndpointConfigured(config: OtelExportConfig): boolean {
   return (config.endpoint !== undefined) !== (config.endpointEnv !== undefined);
+}
+
+export function isReliableExportDeliveryReport(
+  report: ExportDeliveryReport | ReliableExportDeliveryReport,
+): report is ReliableExportDeliveryReport {
+  return 'reliableDeliveryContractVersion' in report;
 }
 
 export {

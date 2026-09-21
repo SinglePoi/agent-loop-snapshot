@@ -1,6 +1,6 @@
 # Agent Loop Snapshot 交接记录
 
-更新时间：2026-09-07
+更新时间：2026-09-21
 
 ## 当前进度
 
@@ -25,6 +25,9 @@
 - ALS-304：实现 checkpoint resume、经策略守卫的 live adapter 验证回放，以及声明式差异比较。
 - ALS-502：实现 Recorder/Trace/Graph 基准、并发压力与存储故障注入，保证写入失败不会发布虚假的成功状态。
 - ALS-503：完成不可信快照输入限制、安全/发布文档、受限 tarball 内容与 clean-install 发布 smoke。
+- TDX-05/06：实现可靠 OTLP 交付意图、稳定拆批与队列 scoped resume，并接入 SDK/CLI 生命周期和稳定退出码。
+- TDX-07：完成固定摘要 Collector E2E 脚本、接收内容解码断言、兼容性文档与打包消费者 OTLP smoke；用户已决定暂缓真实 Collector/临时消费者安装验收。恢复时执行 `pnpm run collector:verify` 与 `pnpm run release:verify`，且在通过前不得标记为已验收。
+- TDX-08：已交付 `@agent-loop-snapshot/viewer` 与 `alsnap view <snapshot>`。服务只监听 loopback，使用 session token、Host/Origin 和只读方法限制；完成正常示例、失败筛选与按需图/状态的浏览器验收，且覆盖 OTLP observation/partial、损坏快照与 100k 分页性能基线。详见 `docs/local-viewer.md` 和 `docs/benchmarks/viewer-100k.md`。
 
 ## ALS-103 已实现内容
 
@@ -162,31 +165,32 @@ M1 的 ALS-001 至 ALS-106、M2 的 ALS-201 至 ALS-203、M3 的 ALS-301 至 ALS
 
 ## 验证结果
 
-最后一次完整质量验证：
+最后一次离线质量验证：
 
 ```text
 直接调用项目锁定的 TypeScript、ESLint、Prettier 和 Node.js 工具
 类型检查：通过
 ESLint：通过
 Prettier：通过
-测试：60 passed, 0 failed
+测试：218 passed, 0 failed, 1 skipped（Windows 不允许创建符号链接）
 ```
 
 本机使用 Node.js 24.20.0；项目约束是 Node.js `>=24.20.0 <25` 和 pnpm `>=11.19.0 <12`。最终质量门禁和 100k Trace Loader 基准均使用本机 Node.js 24.20.0 执行。
 
 ## 下一步
 
-当前规划内的 ALS-001 至 ALS-503 已完成。下一步需要产品/发布负责人确认：
+当前规划内的 ALS-001 至 ALS-503 已完成。TDX-07 的源码、文档和离线验证已完成；下一步先在具备 Docker daemon 与 registry 访问权限的环境复验，再由产品/发布负责人确认：
 
-1. npm registry 与正式 package scope；
-2. 首个公开版本号、发布负责人和变更日志发布日期；
-3. 是否解除 workspace 包的 `private` 保护并启用 CI 发布凭据。
+1. 执行 `pnpm run collector:verify`（当前缺 Docker daemon，不能标记 Collector E2E 通过）；
+2. 执行 `node scripts/release-smoke.js` 或 `pnpm run release:verify`（当前受限网络无法下载 `openai@7.15.0`）；
+3. npm registry 与正式 package scope、首个公开版本号、发布负责人和变更日志发布日期；
+4. 是否解除 workspace 包的 `private` 保护并启用 CI 发布凭据。
 
 ## 新会话提示
 
 新会话开始时可直接粘贴：
 
-> 请阅读 `docs/handoff.md`、`docs/security-and-release.md` 和 `docs/implementation-plan.md`。ALS-001 至 ALS-503 已完成；在确定 registry、package scope 和版本策略前，不要移除 package 的 `private` 标志或尝试发布。
+> 请阅读 `docs/handoff.md`、`docs/telemetry-delivery-and-viewer-plan.md`、`docs/security-and-release.md` 和 `docs/implementation-plan.md`。ALS-001 至 ALS-503 与 TDX-05/06 已完成；TDX-07 等待有 Docker daemon 和 registry 访问权限的环境复验。不要把该环境阻塞标为 E2E/release smoke 通过，也不要移除 package 的 `private` 标志或尝试发布。
 
 ## 工作区注意事项
 

@@ -7,6 +7,6 @@ npm install --save-dev @agent-loop-snapshot/cli
 npx alsnap --help
 ```
 
-Commands return `0` on success, `2` for invalid or non-executable snapshot results, and `1` for usage or runtime errors.
+Commands return `0` on success, `2` for invalid or non-executable snapshot results, and `1` for usage or runtime errors. An OTLP delivery that remains pending, rejected, exhausted, or unknown is a runtime error (`1`), not a successful export.
 
 See the [user guide](https://github.com/SinglePoi/agent-loop-snapshot/blob/dev/docs/user-guide.md).
