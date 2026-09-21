@@ -8,4 +8,4 @@ npm install @agent-loop-snapshot/instrumentation-openai
 
 Initialize `openAIIntegration()` before loading the business module. Recording is metadata-only by default.
 
-See the [SDK instrumentation guide](https://github.com/SinglePoi/agent-loop-snapshot/blob/master/docs/user-guide.md).
+See the [SDK instrumentation guide](https://github.com/SinglePoi/agent-loop-snapshot/blob/development-docs/docs/user-guide.md).

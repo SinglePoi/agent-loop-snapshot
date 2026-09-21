@@ -8,4 +8,4 @@ npm install @agent-loop-snapshot/schema
 
 Use `validateSnapshot()`, `validateSnapshotDirectory()`, `inspectSnapshotCompatibility()`, and `migrateSnapshot()` from the package exports.
 
-See the [user guide](https://github.com/SinglePoi/agent-loop-snapshot/blob/master/docs/user-guide.md) and [schema compatibility](https://github.com/SinglePoi/agent-loop-snapshot/blob/master/docs/schema-compatibility.md).
+See the [user guide](https://github.com/SinglePoi/agent-loop-snapshot/blob/development-docs/docs/user-guide.md) and [schema compatibility](https://github.com/SinglePoi/agent-loop-snapshot/blob/development-docs/docs/schema-compatibility.md).

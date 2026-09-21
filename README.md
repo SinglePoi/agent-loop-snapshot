@@ -1,6 +1,6 @@
 # Agent Loop Snapshot
 
-[简体中文](README.zh-CN.md) · [User Guide](docs/user-guide.md) · [npm packages](https://www.npmjs.com/search?q=%40agent-loop-snapshot)
+[简体中文](README.zh-CN.md) · [User Guide](https://github.com/SinglePoi/agent-loop-snapshot/blob/development-docs/docs/user-guide.md) · [npm packages](https://www.npmjs.com/search?q=%40agent-loop-snapshot)
 
 Agent Loop Snapshot is an open-source toolkit for recording, inspecting, visualizing, and replaying Agent Runtime executions. It stores model calls, tool calls, state changes, checkpoints, and artifacts from an Agent Loop as portable snapshots, making it easier to audit runs, debug control flow, and reproduce tasks under explicit permission and verification rules.
 
@@ -217,7 +217,7 @@ npx alsnap export-otel ./runs/run-123 --config ./export.json --json
 npx alsnap export-otel --resume --config ./export.json --json
 ```
 
-Credentials must be supplied through environment variables. Never put tokens or API keys in configuration files, snapshots, or the Git repository. See [OTLP export and platform integration](docs/otel-export.md) for the full configuration and compatibility matrix.
+Credentials must be supplied through environment variables. Never put tokens or API keys in configuration files, snapshots, or the Git repository. See [OTLP export and platform integration](https://github.com/SinglePoi/agent-loop-snapshot/blob/development-docs/docs/otel-export.md) for the full configuration and compatibility matrix.
 
 ## Snapshot model
 
@@ -272,14 +272,14 @@ CI runs `pnpm run check`. Real OpenTelemetry Collector end-to-end verification r
 
 ## Documentation
 
-- [User Guide](docs/user-guide.md)
-- [Workflow IR v0.1](docs/workflow-ir-v0.1.md)
-- [Schema compatibility and migration](docs/schema-compatibility.md)
-- [OTLP export and platform integration](docs/otel-export.md)
-- [Security and release guide](docs/security-and-release.md)
-- [Implementation plan](docs/implementation-plan.md)
+- [User Guide](https://github.com/SinglePoi/agent-loop-snapshot/blob/development-docs/docs/user-guide.md)
+- [Workflow IR v0.1](https://github.com/SinglePoi/agent-loop-snapshot/blob/development-docs/docs/workflow-ir-v0.1.md)
+- [Schema compatibility and migration](https://github.com/SinglePoi/agent-loop-snapshot/blob/development-docs/docs/schema-compatibility.md)
+- [OTLP export and platform integration](https://github.com/SinglePoi/agent-loop-snapshot/blob/development-docs/docs/otel-export.md)
+- [Security and release guide](https://github.com/SinglePoi/agent-loop-snapshot/blob/development-docs/docs/security-and-release.md)
+- [Implementation plan](https://github.com/SinglePoi/agent-loop-snapshot/blob/development-docs/docs/implementation-plan.md)
 - [Changelog](CHANGELOG.md)
-- [Architecture Decision Records](docs/adr/)
+- [Architecture Decision Records](https://github.com/SinglePoi/agent-loop-snapshot/tree/development-docs/docs/adr)
 
 ## License
 

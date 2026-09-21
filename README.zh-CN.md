@@ -1,6 +1,6 @@
 # Agent Loop Snapshot
 
-[English](README.md) · [用户使用手册](docs/user-guide.zh-CN.md) · [npm packages](https://www.npmjs.com/search?q=%40agent-loop-snapshot)
+[English](README.md) · [用户使用手册](https://github.com/SinglePoi/agent-loop-snapshot/blob/development-docs/docs/user-guide.zh-CN.md) · [npm packages](https://www.npmjs.com/search?q=%40agent-loop-snapshot)
 
 Agent Loop Snapshot 是一个面向 Agent Runtime 的开源运行记录、检查、可视化与回放工具。它将一次 Agent Loop 中的模型调用、工具调用、状态变化、检查点和产物保存为可移植快照，帮助你审计运行过程、调试控制流，并在明确的权限和验证规则下复现任务。
 
@@ -217,7 +217,7 @@ npx alsnap export-otel ./runs/run-123 --config ./export.json --json
 npx alsnap export-otel --resume --config ./export.json --json
 ```
 
-认证信息只能通过环境变量提供，不要把 token 或 API key 写进配置文件、快照或 Git 仓库。完整配置和平台兼容矩阵见 [OTLP/HTTP 导出与平台接入](docs/otel-export.md)。
+认证信息只能通过环境变量提供，不要把 token 或 API key 写进配置文件、快照或 Git 仓库。完整配置和平台兼容矩阵见 [OTLP/HTTP 导出与平台接入](https://github.com/SinglePoi/agent-loop-snapshot/blob/development-docs/docs/otel-export.md)。
 
 ## 快照模型
 
@@ -272,14 +272,14 @@ CI 使用 `pnpm run check`。真实 OpenTelemetry Collector 端到端验证需�
 
 ## 文档
 
-- [用户使用手册](docs/user-guide.md)
-- [Workflow IR v0.1](docs/workflow-ir-v0.1.md)
-- [Schema 兼容性与迁移](docs/schema-compatibility.md)
-- [OTLP/HTTP 导出与平台接入](docs/otel-export.md)
-- [安全与发布指南](docs/security-and-release.md)
-- [实施规划](docs/implementation-plan.md)
+- [用户使用手册](https://github.com/SinglePoi/agent-loop-snapshot/blob/development-docs/docs/user-guide.md)
+- [Workflow IR v0.1](https://github.com/SinglePoi/agent-loop-snapshot/blob/development-docs/docs/workflow-ir-v0.1.md)
+- [Schema 兼容性与迁移](https://github.com/SinglePoi/agent-loop-snapshot/blob/development-docs/docs/schema-compatibility.md)
+- [OTLP/HTTP 导出与平台接入](https://github.com/SinglePoi/agent-loop-snapshot/blob/development-docs/docs/otel-export.md)
+- [安全与发布指南](https://github.com/SinglePoi/agent-loop-snapshot/blob/development-docs/docs/security-and-release.md)
+- [实施规划](https://github.com/SinglePoi/agent-loop-snapshot/blob/development-docs/docs/implementation-plan.md)
 - [变更日志](CHANGELOG.md)
-- [架构决策记录](docs/adr/)
+- [架构决策记录](https://github.com/SinglePoi/agent-loop-snapshot/tree/development-docs/docs/adr)
 
 ## 许可证
 
