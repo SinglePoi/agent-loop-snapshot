@@ -1,16 +1,11 @@
 {
   "name": "@agent-loop-snapshot/cli",
-  "version": "0.1.0",
-  "private": true,
-  "description": "Validate, inspect, and visualize Agent Loop Snapshot artifacts.",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/SinglePoi/agent-loop-snapshot.git"
-  },
-  "author": "Agent Loop Snapshot contributors",
-  "homepage": "https://github.com/SinglePoi/agent-loop-snapshot",
-  "bugs": {
-    "url": "https://github.com/SinglePoi/agent-loop-snapshot/issues"
+  "version": "0.1.2",
+  "license": "MIT",
+  "engines": { "node": ">=24.20.0 <25" },
+  "private": false,
+  "publishConfig": {
+    "access": "public"
   },
   "files": [
     "dist",
@@ -30,6 +25,7 @@
   "dependencies": {
     "@agent-loop-snapshot/graph": "workspace:*",
     "@agent-loop-snapshot/otel-import": "workspace:*",
+    "@agent-loop-snapshot/otel-export": "workspace:*",
     "@agent-loop-snapshot/recorder": "workspace:*",
     "@agent-loop-snapshot/replay": "workspace:*",
     "@agent-loop-snapshot/schema": "workspace:*",

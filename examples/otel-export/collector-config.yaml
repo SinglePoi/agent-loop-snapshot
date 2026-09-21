@@ -1,0 +1,17 @@
+# Validated by `pnpm run collector:verify` with
+# otel/opentelemetry-collector-contrib:0.114.0.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+exporters:
+  file:
+    path: /output/traces.json
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [file]

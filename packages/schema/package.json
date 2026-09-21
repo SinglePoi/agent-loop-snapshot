@@ -1,7 +1,12 @@
 {
   "name": "@agent-loop-snapshot/schema",
-  "version": "0.1.0",
-  "private": true,
+  "version": "0.1.2",
+  "license": "MIT",
+  "engines": { "node": ">=24.20.0 <25" },
+  "private": false,
+  "publishConfig": {
+    "access": "public"
+  },
   "files": [
     "dist",
     "schemas",

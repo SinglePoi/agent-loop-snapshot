@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,15 +9,14 @@ import type { EventEnvelope } from '@agent-loop-snapshot/schema';
 
 import {
   createOtlpHttpClient,
+  createOtlpExporter,
+  createOtelExportConfigFingerprint,
   openOtlpPersistentQueue,
   OtlpQueueError,
   dryRunOtlpExport,
   isExportEndpointConfigured,
   mapSnapshotToOtlp,
   otelExportContractVersion,
-  otelExportReliableDeliveryContractVersion,
-  otlpJsonMappingVersion,
-  otlpPersistentQueueVersion,
 } from './index.js';
 
 const emptyRequest = { resourceSpans: [] };
@@ -60,6 +59,26 @@ async function withServer<T>(
   }
 }
 
+async function waitFor(
+  condition: () => boolean | Promise<boolean>,
+  message: string,
+): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (await condition()) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+  assert.fail(message);
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function event(
   sequence: number,
   type: string,
@@ -85,11 +104,161 @@ test('exports a stable contract version', () => {
   assert.equal(otelExportContractVersion, 'otel-export-1.0');
 });
 
-test('freezes a distinct reliable-delivery migration contract', () => {
-  assert.equal(otelExportReliableDeliveryContractVersion, 'otel-export-2.0');
-  assert.equal(otlpJsonMappingVersion, 'otlp-json-mapping-2');
-  assert.equal(otlpPersistentQueueVersion, 'otlp-persistent-queue-2');
-  assert.notEqual(otelExportReliableDeliveryContractVersion, otelExportContractVersion);
+test('queues committed snapshots and splits their OTLP spans before automatic delivery', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'alsnap-otlp-exporter-'));
+  let requests = 0;
+  try {
+    await withServer(
+      (request, response) => {
+        requests += 1;
+        request.resume();
+        response.setHeader('content-type', 'application/json');
+        response.end('{}');
+      },
+      async (endpoint) => {
+        const exporter = createOtlpExporter({
+          targetAlias: 'fixture',
+          endpoint,
+          serviceName: 'test',
+          queueDir: root,
+          batchSpanLimit: 1,
+        });
+        const queued = await exporter.exportSnapshot({
+          manifest: {
+            run_id: 'run_test',
+            source: 'native',
+            completeness: 'complete',
+            terminal_status: 'completed',
+          },
+          events: [
+            event(1, 'run.started', {}),
+            event(2, 'model.requested', { correlation_key: 'one', model: 'test', input: {} }),
+            event(3, 'model.completed', { correlation_key: 'one', output: {} }, ['evt_2']),
+          ],
+        });
+        assert.equal(queued.state, 'queued');
+        const flush = await exporter.shutdown();
+        assert.equal(flush.pendingCount, 0);
+        assert.equal(flush.deliveries.length, 2);
+        assert.ok(flush.deliveries.every((delivery) => delivery.state === 'accepted'));
+      },
+    );
+    assert.equal(requests, 2);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('flushes already queued batches when a later split batch cannot enter the queue', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'alsnap-otlp-exporter-capacity-'));
+  let requests = 0;
+  try {
+    await withServer(
+      (request, response) => {
+        requests += 1;
+        request.resume();
+        response.end();
+      },
+      async (endpoint) => {
+        const exporter = createOtlpExporter({
+          targetAlias: 'fixture',
+          endpoint,
+          serviceName: 'test',
+          queueDir: root,
+          batchSpanLimit: 1,
+          queueMaxEntries: 1,
+        });
+        const delivery = await exporter.exportSnapshot({
+          manifest: {
+            run_id: 'run_test',
+            source: 'native',
+            completeness: 'complete',
+            terminal_status: 'completed',
+          },
+          events: [
+            event(1, 'run.started', {}),
+            event(2, 'model.requested', { correlation_key: 'one', model: 'test', input: {} }),
+            event(3, 'model.completed', { correlation_key: 'one', output: {} }, ['evt_2']),
+          ],
+        });
+        assert.equal(delivery.state, 'not_queued');
+
+        const flushed = await exporter.shutdown();
+        assert.equal(flushed.pendingCount, 0);
+        assert.ok(flushed.deliveries.some((item) => item.state === 'accepted'));
+      },
+    );
+    assert.equal(requests, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('keeps bounded background delivery history for long-running exporters', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'alsnap-otlp-exporter-history-'));
+  let requests = 0;
+  try {
+    await withServer(
+      (request, response) => {
+        requests += 1;
+        request.resume();
+        response.end();
+      },
+      async (endpoint) => {
+        const config = {
+          targetAlias: 'fixture',
+          endpoint,
+          serviceName: 'test',
+          queueDir: root,
+        };
+        const exporter = createOtlpExporter(config);
+        const inspector = await openOtlpPersistentQueue({
+          queueDir: root,
+          targetAlias: config.targetAlias,
+          configFingerprint: createOtelExportConfigFingerprint(config),
+        });
+        for (let index = 0; index < 129; index += 1) {
+          const delivery = await exporter.exportSnapshot({
+            manifest: {
+              run_id: 'run_test',
+              source: 'otel-import',
+              completeness: 'unknown',
+              terminal_status: 'unknown',
+            },
+            events: [
+              event(1, 'otel.span', {
+                trace_id: '11111111111111111111111111111111',
+                span_id: '2222222222222222',
+                name: 'background-history',
+                status: 'unset',
+                start_time_unix_nano: '1000000000',
+                end_time_unix_nano: '2000000000',
+                resource: { attributes: {} },
+                scope: { name: 'fixture', version: '1.0.0' },
+                attributes: {},
+                events: [],
+                links: [],
+              }),
+            ],
+          });
+          assert.equal(delivery.state, 'queued', delivery.message);
+          await waitFor(
+            async () =>
+              (await inspector.inspect()).pendingCount === 0 &&
+              !(await pathExists(join(root, 'consumer.lock'))),
+            'The background exporter did not finish delivering the fixture batch.',
+          );
+        }
+
+        const flushed = await exporter.shutdown();
+        assert.equal(flushed.pendingCount, 0);
+        assert.ok(flushed.deliveries.length <= 128);
+      },
+    );
+    assert.ok(requests > 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('requires exactly one endpoint source', () => {
@@ -275,6 +444,24 @@ test('sends OTLP JSON with headers resolved only at send time', async () => {
   );
 });
 
+test('accepts an empty successful OTLP response from a Collector', async () => {
+  await withServer(
+    (_, response) => {
+      response.statusCode = 200;
+      response.end();
+    },
+    async (endpoint) => {
+      const result = await createOtlpHttpClient({
+        targetAlias: 'fixture',
+        endpoint,
+        serviceName: 'test',
+      }).send(emptyRequest, 2);
+      assert.equal(result.state, 'accepted');
+      assert.equal(result.acceptedSpanCount, 2);
+    },
+  );
+});
+
 test('does not retry OTLP partial_success responses', async () => {
   let requests = 0;
   await withServer(
@@ -299,6 +486,24 @@ test('does not retry OTLP partial_success responses', async () => {
       assert.equal(result.acceptedSpanCount, 2);
       assert.equal(result.rejectedSpanCount, 1);
       assert.equal(requests, 1);
+    },
+  );
+});
+
+test('accepts an OTLP partialSuccess response when it rejects zero spans', async () => {
+  await withServer(
+    (_, response) => {
+      response.setHeader('content-type', 'application/json');
+      response.end(JSON.stringify({ partialSuccess: {} }));
+    },
+    async (endpoint) => {
+      const result = await createOtlpHttpClient({
+        targetAlias: 'fixture',
+        endpoint,
+        serviceName: 'test',
+      }).send(emptyRequest, 2);
+      assert.equal(result.state, 'accepted');
+      assert.equal(result.acceptedSpanCount, 2);
     },
   );
 });

@@ -1,6 +1,6 @@
 # 低侵入采集、OpenTelemetry 导入与外部平台导出开发计划
 
-更新时间：2026-09-11。状态：CAP-01 至 CAP-08、EXP-01 至 EXP-04 已完成；EXP-05 及其余导出任务待实现，交给 coding agent 执行。
+更新时间：2026-09-12。状态：CAP-01 至 CAP-08、EXP-01 至 EXP-06 已完成。
 
 本文替代原函数包装计划，保留文件路径。所有新增 API、命令和能力均为待实现目标，不能按已实现功能宣传。
 
@@ -348,6 +348,19 @@ flush/shutdown 有 deadline，超时保留队列并报告未发送数量；重�
 - 已新增 `openOtlpPersistentQueue()`：按队列目录保存已过滤 request、span 数、目标别名、非敏感配置指纹、批次 ID 和尝试次数；新条目使用同步临时文件与原子发布，更新使用原子替换，凭据、endpoint 和原始快照不写入队列；
 - 队列支持条数/字节数/保留期限上限，容量或磁盘提交失败返回 `not_queued` 并保留源快照；成功或不可重试拒绝删除批次，`exhausted` / `unknown_delivery` 更新后保留，过期条目在入队或 flush 时清理；
 - `flush()` / `shutdown()` 采用单消费者文件锁、陈旧锁恢复、配置指纹隔离与 deadline；已覆盖持久化重启恢复、容量、配置变化不串写、过期、deadline 保留、并发锁和中断遗留锁恢复。
+
+**EXP-05 完成记录（2026-09-12）**
+
+- 已新增 `createOtlpExporter(config)`：将快照映射、出站过滤、持久化队列和 HTTP 客户端组合为独立 exporter。提交后的原生或 SDK 快照仅异步入队和发送；发送故障以诊断或后续 flush/shutdown 报告，不会重跑或改变业务调用结果。`batchSpanLimit` 会拆分 OTLP request；`shutdown()` 汇总后台发送并有界续传。
+- `instrument()` 与 `initInstrumentation()` 均接受 `exporters`，且只在原子提交本地 manifest 成功后调度导出；通用入口新增 `flushExporters()` / `shutdown()`，SDK controller 的 `shutdown()` 同步 flush 已配置 exporter。
+- CLI 已提供 `alsnap export-otel <snapshot> --config <export.json> [--dry-run] [--json]` 及 `alsnap export-otel --resume --config <export.json> [--json]`。配置仅允许 endpoint 或 endpointEnv 二选一、环境变量 header 引用和可选本地队列/批次/重试限制；dry-run 不联网、不入队、不解析凭据，显式发送只有全部批次完整接受时成功。
+- 已覆盖 exporter 自动批次发送、通用/SDK 两种运行入口自动导出、CLI dry-run 与本地 HTTP queue 发送；EXP-06 将负责固定 Collector 的端到端验证、平台指南、兼容矩阵、示例和发布回归。
+
+**EXP-06 完成记录（2026-09-12）**
+
+- 已加入固定 `otel/opentelemetry-collector-contrib:0.114.0` 的 file-exporter 配置、`pnpm run collector:verify` 及严格端到端脚本：它先验证 CLI 在远端不可达时只保留已过滤队列，再启动 Collector 用 `--resume` 发送，并验证 `initInstrumentation()` 的运行结束自动导出被 Collector 接收；Docker 不可用或镜像拉取失败会直接失败，绝不记为通过。
+- 已新增 Langtrace 和 Grafana Cloud 配置指南及兼容矩阵。Langtrace 的 `/api/trace` 接受本项目的 OTLP/HTTP JSON，使用 `x-api-key` 鉴权，也可经 Collector 转发；Grafana Cloud 文档支持 JSON protobuf 编码用于低流量测试，生产配置仍建议经 Collector/Alloy。两者均只标记为“依据官方文档”，不声称云端实测。
+- 已将 `otel-export` 纳入 tarball consumer 的本地包覆盖和常规测试清单。Docker 网络恢复后，`pnpm run collector:verify` 已实际通过：固定 Collector 收到 CLI 队列 `--resume` 和 SDK 运行结束自动导出的 trace。
 
 CAP-06 可在 CAP-02 后独立实施；可由单个 coding agent 顺序完成，不要求委派或创建外部任务。
 

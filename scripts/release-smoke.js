@@ -100,15 +100,16 @@ export async function runReleaseSmoke() {
     await mkdir(tarballs, { recursive: true });
     await mkdir(consumer, { recursive: true });
     await runPnpm(['-r', '--filter', './packages/*', 'pack', '--pack-destination', tarballs], root);
-    const packageFile = (name) => `file:../tarballs/${name}-0.1.0.tgz`;
+    const packageFile = (name, version = '0.1.2') => `file:../tarballs/${name}-${version}.tgz`;
     const localPackages = {
       '@agent-loop-snapshot/cli': packageFile('agent-loop-snapshot-cli'),
-      '@agent-loop-snapshot/example-runtime': packageFile('agent-loop-snapshot-example-runtime'),
+      '@agent-loop-snapshot/example-runtime': packageFile('agent-loop-snapshot-example-runtime', '0.1.0'),
       '@agent-loop-snapshot/graph': packageFile('agent-loop-snapshot-graph'),
       '@agent-loop-snapshot/instrumentation': packageFile('agent-loop-snapshot-instrumentation'),
       '@agent-loop-snapshot/instrumentation-openai': packageFile(
         'agent-loop-snapshot-instrumentation-openai',
       ),
+      '@agent-loop-snapshot/otel-export': packageFile('agent-loop-snapshot-otel-export'),
       '@agent-loop-snapshot/otel-import': packageFile('agent-loop-snapshot-otel-import'),
       '@agent-loop-snapshot/otel-export': packageFile('agent-loop-snapshot-otel-export'),
       '@agent-loop-snapshot/recorder': packageFile('agent-loop-snapshot-recorder'),

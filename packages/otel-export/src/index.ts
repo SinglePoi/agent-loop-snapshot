@@ -4,7 +4,9 @@ import type {
   JsonValue,
   SnapshotCompleteness,
   SnapshotLimitation,
+  SnapshotManifest,
   SnapshotSource,
+  RuntimeDescriptor,
 } from '@agent-loop-snapshot/schema';
 
 /** Contract version for snapshot-to-OTLP mapping and reports. */
@@ -43,18 +45,19 @@ export interface OtelExportConfig {
   readonly retryMaxAttempts?: number;
   readonly retryBudgetMs?: number;
   readonly queueDir?: string;
+  readonly queueMaxEntries?: number;
+  readonly queueMaxBytes?: number;
+  readonly queueRetentionMs?: number;
 }
 
 export type ExportSnapshotSource = SnapshotSource;
 
 export interface ExportSnapshotInput {
-  readonly manifest: {
-    readonly run_id: string;
-    readonly source?: SnapshotSource;
-    readonly completeness?: SnapshotCompleteness;
-    readonly limitations?: readonly SnapshotLimitation[];
-    readonly runtime?: JsonObject;
-    readonly terminal_status?: 'completed' | 'failed' | 'aborted' | 'unknown' | null;
+  readonly manifest: Pick<
+    SnapshotManifest,
+    'run_id' | 'source' | 'completeness' | 'limitations' | 'terminal_status'
+  > & {
+    readonly runtime?: RuntimeDescriptor;
   };
   readonly events: readonly EventEnvelope<string, unknown>[];
 }
@@ -374,6 +377,7 @@ export {
   mapSnapshotToOtlp,
 } from './mapper.js';
 export { createOtlpHttpClient } from './http-client.js';
+export { createOtlpExporter } from './exporter.js';
 export {
   createOtelExportConfigFingerprint,
   openOtlpPersistentQueue,
