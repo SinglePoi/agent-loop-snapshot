@@ -9,4 +9,4 @@ npx alsnap --help
 
 Commands return `0` on success, `2` for invalid or non-executable snapshot results, and `1` for usage or runtime errors.
 
-See the [user guide](https://github.com/SinglePoi/agent-loop-snapshot/blob/development-docs/docs/user-guide.md).
+See the [user guide](https://github.com/SinglePoi/agent-loop-snapshot/blob/dev/docs/user-guide.md).

@@ -8,4 +8,4 @@ npm install @agent-loop-snapshot/graph
 
 The package provides deterministic Mermaid and machine-readable graph projections.
 
-See the [user guide](https://github.com/SinglePoi/agent-loop-snapshot/blob/development-docs/docs/user-guide.md) for CLI examples.
+See the [user guide](https://github.com/SinglePoi/agent-loop-snapshot/blob/dev/docs/user-guide.md) for CLI examples.

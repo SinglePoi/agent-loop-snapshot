@@ -8,4 +8,4 @@ npm install @agent-loop-snapshot/otel-import
 
 Imported snapshots can be validated, inspected, and graphed; they cannot be replayed, resumed, or compiled as executable workflows.
 
-See the [user guide](https://github.com/SinglePoi/agent-loop-snapshot/blob/development-docs/docs/user-guide.md).
+See the [user guide](https://github.com/SinglePoi/agent-loop-snapshot/blob/dev/docs/user-guide.md).

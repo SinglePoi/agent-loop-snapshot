@@ -8,4 +8,4 @@ npm install @agent-loop-snapshot/recorder
 
 The core API includes `startRun`, `appendEvent`, `checkpoint`, `completeRun`, `failRun`, and `SnapshotWriter`.
 
-See the [user guide](https://github.com/SinglePoi/agent-loop-snapshot/blob/development-docs/docs/user-guide.md) for recording examples.
+See the [user guide](https://github.com/SinglePoi/agent-loop-snapshot/blob/dev/docs/user-guide.md) for recording examples.

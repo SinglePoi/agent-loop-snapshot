@@ -8,4 +8,4 @@ npm install @agent-loop-snapshot/instrumentation
 
 Use `instrument()` with explicit tool side-effect levels and checkpoint callbacks.
 
-See the [user guide](https://github.com/SinglePoi/agent-loop-snapshot/blob/development-docs/docs/user-guide.md) for a complete example.
+See the [user guide](https://github.com/SinglePoi/agent-loop-snapshot/blob/dev/docs/user-guide.md) for a complete example.
