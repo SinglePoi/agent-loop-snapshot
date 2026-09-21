@@ -105,6 +105,17 @@ export function createOtlpExporter(config: OtelExportConfig): OtlpExporter {
       queueDir: config.queueDir ?? '',
       targetAlias: config.targetAlias,
       configFingerprint: createOtelExportConfigFingerprint(config),
+      ...(config.destinationIdentity === undefined
+        ? {}
+        : { destinationIdentity: config.destinationIdentity }),
+      ...(config.destinationGeneration === undefined
+        ? {}
+        : { destinationGeneration: config.destinationGeneration }),
+      contentPolicy: config.contentPolicy ?? 'metadata-only',
+      ...(config.retryMaxAttempts === undefined
+        ? {}
+        : { retryMaxAttempts: config.retryMaxAttempts }),
+      ...(config.retryBudgetMs === undefined ? {} : { retryBudgetMs: config.retryBudgetMs }),
       ...(config.queueMaxEntries === undefined ? {} : { maxEntries: config.queueMaxEntries }),
       ...(config.queueMaxBytes === undefined ? {} : { maxBytes: config.queueMaxBytes }),
       ...(config.queueRetentionMs === undefined ? {} : { retentionMs: config.queueRetentionMs }),

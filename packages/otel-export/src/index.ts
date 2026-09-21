@@ -61,6 +61,14 @@ export interface OtelExportMappingLimits {
 
 export interface OtelExportConfig {
   readonly targetAlias: string;
+  /**
+   * Safe, caller-chosen receiver or tenant identity. It must not contain an
+   * endpoint, header value, or credential. Changing tenants requires a new
+   * identity or generation even when the credential variable name is reused.
+   */
+  readonly destinationIdentity?: string;
+  /** Explicit generation for a selected destination identity. */
+  readonly destinationGeneration?: string;
   /** Exactly one of endpoint and endpointEnv must be supplied by callers. */
   readonly endpoint?: string;
   readonly endpointEnv?: string;
@@ -282,6 +290,11 @@ export type ReliableDeliveryState =
 
 export interface ExportDeliveryReport {
   readonly state: ExportDeliveryState;
+  /**
+   * More specific delivery meaning while the v1 `state` union remains
+   * source-compatible. TDX-05 will make this the primary report state.
+   */
+  readonly reliableState?: ReliableDeliveryState;
   readonly targetAlias: string;
   readonly batchId?: string;
   readonly attempted: boolean;
@@ -336,13 +349,18 @@ export interface OtlpHttpRuntime {
   readonly fetch?: typeof globalThis.fetch;
   /** Test seam; production resolves names from process.env while sending. */
   readonly environment?: Readonly<Record<string, string | undefined>>;
+  /** Wall clock used only for HTTP-date Retry-After values. */
   readonly now?: () => number;
+  /** Monotonic clock used for request and retry-budget accounting. */
+  readonly monotonicNow?: () => number;
   readonly random?: () => number;
   readonly sleep?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
 }
 
 export interface OtlpHttpSendOptions {
   readonly signal?: AbortSignal;
+  /** Refuse a send if the currently resolved destination no longer matches. */
+  readonly expectedTargetFingerprint?: string;
 }
 
 export interface OtlpHttpClient {
@@ -359,10 +377,21 @@ export interface OtlpPersistentQueueOptions {
   readonly targetAlias: string;
   /** Hash of non-sensitive destination and content-policy configuration. */
   readonly configFingerprint: string;
+  /** Safe identity and generation, used to make tenant changes explicit. */
+  readonly destinationIdentity?: string;
+  readonly destinationGeneration?: string;
+  readonly mappingVersion?: OtlpJsonMappingVersion;
+  readonly contentPolicy?: ExportContentPolicy;
+  readonly encoding?: 'otlp-http-json';
   readonly maxEntries?: number;
   readonly maxBytes?: number;
   readonly retentionMs?: number;
+  /** Consumer lease duration. The legacy name is retained as an alias. */
+  readonly leaseDurationMs?: number;
   readonly lockStaleMs?: number;
+  readonly retryMaxAttempts?: number;
+  readonly retryBudgetMs?: number;
+  readonly maxEntryBytes?: number;
   /** Test seam; production defaults to Date.now. */
   readonly now?: () => number;
 }
@@ -372,13 +401,23 @@ export interface OtlpQueueBatch {
   readonly request: OtlpExportTraceServiceRequest;
   readonly spanCount: number;
   readonly batchId?: string;
+  /** Optional safe source reference for delivery/archive diagnostics. */
+  readonly sourceSnapshotId?: string;
 }
 
 export interface OtlpQueueInspection {
   readonly pendingCount: number;
   readonly pendingBytes: number;
+  readonly oldestPendingAgeMs?: number;
   readonly expiredCount: number;
   readonly foreignConfigCount: number;
+  readonly archivedCount: number;
+  readonly archivedBytes: number;
+  readonly quarantinedCount: number;
+  readonly quarantinedBytes: number;
+  readonly rejectedCount: number;
+  readonly exhaustedCount: number;
+  readonly unknownDeliveryCount: number;
 }
 
 export interface OtlpQueueFlushOptions {

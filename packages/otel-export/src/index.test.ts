@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { access, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -765,6 +765,7 @@ test('does not retry OTLP partial_success responses', async () => {
       });
       const result = await client.send(emptyRequest, 3);
       assert.equal(result.state, 'rejected');
+      assert.equal(result.reliableState, 'partially_rejected');
       assert.equal(result.acceptedSpanCount, 2);
       assert.equal(result.rejectedSpanCount, 1);
       assert.equal(requests, 1);
@@ -785,9 +786,95 @@ test('accepts an OTLP partialSuccess response when it rejects zero spans', async
         serviceName: 'test',
       }).send(emptyRequest, 2);
       assert.equal(result.state, 'accepted');
+      assert.equal(result.reliableState, 'accepted');
       assert.equal(result.acceptedSpanCount, 2);
     },
   );
+});
+
+test('reports a sanitized warning when OTLP accepts every span with partialSuccess details', async () => {
+  await withServer(
+    (_, response) => {
+      response.setHeader('content-type', 'application/json');
+      response.end(
+        JSON.stringify({
+          partialSuccess: {
+            rejectedSpans: '0',
+            errorMessage: 'Authorization: Bearer secret-which-must-not-enter-the-report',
+          },
+        }),
+      );
+    },
+    async (endpoint) => {
+      const result = await createOtlpHttpClient({
+        targetAlias: 'fixture',
+        endpoint,
+        serviceName: 'test',
+      }).send(emptyRequest, 2);
+      assert.equal(result.state, 'accepted');
+      assert.equal(result.reliableState, 'accepted_with_warnings');
+      assert.equal(result.acceptedSpanCount, 2);
+      assert.equal(result.rejectedSpanCount, 0);
+      assert.equal(result.message, 'Collector accepted the batch with a sanitized warning.');
+      assert.ok(!result.message?.includes('secret'));
+    },
+  );
+});
+
+test('permanently rejects malformed OTLP partialSuccess counts without retrying', async () => {
+  let requests = 0;
+  await withServer(
+    (_, response) => {
+      requests += 1;
+      response.setHeader('content-type', 'application/json');
+      response.end(JSON.stringify({ partialSuccess: { rejectedSpans: '3' } }));
+    },
+    async (endpoint) => {
+      const result = await createOtlpHttpClient({
+        targetAlias: 'fixture',
+        endpoint,
+        serviceName: 'test',
+        retryMaxAttempts: 3,
+      }).send(emptyRequest, 2);
+      assert.equal(result.state, 'rejected');
+      assert.equal(result.reliableState, 'permanently_rejected');
+      assert.equal(result.attempts, 1);
+      assert.equal(result.message, 'Collector reported an invalid rejected-span count.');
+    },
+  );
+  assert.equal(requests, 1);
+});
+
+test('permanently rejects unreadable and structurally invalid OTLP success responses', async () => {
+  const responses = [
+    new Response('{', { status: 200 }),
+    new Response('{}', { status: 200, headers: { 'content-length': String(4 * 1024 * 1024 + 1) } }),
+    new Response(JSON.stringify({ partialSuccess: { rejectedSpans: '-1' } }), { status: 200 }),
+  ];
+  let requests = 0;
+  const client = createOtlpHttpClient(
+    {
+      targetAlias: 'fixture',
+      endpoint: 'https://collector.example.test/v1/traces',
+      serviceName: 'test',
+      retryMaxAttempts: 3,
+    },
+    {
+      fetch: async () => {
+        const response = responses[requests];
+        requests += 1;
+        assert.ok(response);
+        return response;
+      },
+    },
+  );
+  for (let index = 0; index < responses.length; index += 1) {
+    const result = await client.send(emptyRequest, 1);
+    assert.equal(result.state, 'rejected');
+    assert.equal(result.reliableState, 'permanently_rejected');
+    assert.equal(result.attempts, 1);
+  }
+  assert.equal(requests, responses.length);
 });
 
 test('retries 429 with Retry-After before accepting', async () => {
@@ -817,6 +904,159 @@ test('retries 429 with Retry-After before accepting', async () => {
     },
   );
   assert.equal(requests, 2);
+});
+
+test('uses the wall clock for HTTP-date Retry-After values', async () => {
+  const delays: number[] = [];
+  let requests = 0;
+  const wallClock = Date.parse('2026-09-21T00:00:00.000Z');
+  const client = createOtlpHttpClient(
+    {
+      targetAlias: 'fixture',
+      endpoint: 'https://collector.example.test/v1/traces',
+      serviceName: 'test',
+      retryMaxAttempts: 2,
+    },
+    {
+      fetch: async () => {
+        requests += 1;
+        if (requests === 1) {
+          return new Response('', {
+            status: 503,
+            headers: { 'retry-after': new Date(wallClock + 3_000).toUTCString() },
+          });
+        }
+        return new Response('{}', { status: 200 });
+      },
+      now: () => wallClock,
+      monotonicNow: () => 0,
+      sleep: async (delay) => void delays.push(delay),
+    },
+  );
+  const result = await client.send(emptyRequest, 1);
+  assert.equal(result.state, 'accepted');
+  assert.deepEqual(delays, [3_000]);
+  assert.equal(requests, 2);
+});
+
+test('does not start another request or sleep beyond the total retry budget', async () => {
+  let monotonicClock = 0;
+  let requests = 0;
+  const client = createOtlpHttpClient(
+    {
+      targetAlias: 'fixture',
+      endpoint: 'https://collector.example.test/v1/traces',
+      serviceName: 'test',
+      timeoutMs: 1_000,
+      retryBudgetMs: 20,
+      retryMaxAttempts: 2,
+    },
+    {
+      fetch: async () => {
+        requests += 1;
+        monotonicClock = 20;
+        return new Response('', { status: 503 });
+      },
+      monotonicNow: () => monotonicClock,
+      sleep: async () => assert.fail('retry sleep must not exceed the total deadline'),
+    },
+  );
+  const result = await client.send(emptyRequest, 1);
+  assert.equal(result.state, 'exhausted');
+  assert.equal(result.reliableState, 'retry_exhausted');
+  assert.equal(result.attempts, 1);
+  assert.equal(requests, 1);
+});
+
+test('reports pre-send cancellation and invalid transport settings without calling fetch', async () => {
+  const controller = new AbortController();
+  controller.abort(new Error('cancelled before send'));
+  let requests = 0;
+  const runtime = {
+    fetch: async () => {
+      requests += 1;
+      return new Response('{}', { status: 200 });
+    },
+  };
+  const cancelled = await createOtlpHttpClient(
+    {
+      targetAlias: 'fixture',
+      endpoint: 'https://collector.example.test/v1/traces',
+      serviceName: 'test',
+    },
+    runtime,
+  ).send(emptyRequest, 1, { signal: controller.signal });
+  assert.equal(cancelled.state, 'not_queued');
+  assert.equal(cancelled.reliableState, 'not_sent');
+  assert.equal(cancelled.attempted, false);
+
+  const invalid = await createOtlpHttpClient(
+    {
+      targetAlias: 'fixture',
+      endpoint: 'https://collector.example.test/v1/traces',
+      serviceName: 'test',
+      timeoutMs: 0,
+    },
+    runtime,
+  ).send(emptyRequest, 1);
+  assert.equal(invalid.state, 'not_queued');
+  assert.equal(invalid.reliableState, 'configuration_blocked');
+  assert.equal(invalid.attempted, false);
+
+  const missingCredential = await createOtlpHttpClient(
+    {
+      targetAlias: 'fixture',
+      endpoint: 'https://collector.example.test/v1/traces',
+      headersEnv: { Authorization: 'MISSING_OTLP_AUTHORIZATION' },
+      serviceName: 'test',
+    },
+    runtime,
+  ).send(emptyRequest, 1);
+  assert.equal(missingCredential.state, 'not_queued');
+  assert.equal(missingCredential.reliableState, 'configuration_blocked');
+  assert.equal(requests, 0);
+});
+
+test('reports cancellation after dispatch as unknown delivery', async () => {
+  const controller = new AbortController();
+  const result = await createOtlpHttpClient(
+    {
+      targetAlias: 'fixture',
+      endpoint: 'https://collector.example.test/v1/traces',
+      serviceName: 'test',
+    },
+    {
+      fetch: async () => {
+        controller.abort(new Error('cancelled during send'));
+        throw new Error('request aborted');
+      },
+    },
+  ).send(emptyRequest, 1, { signal: controller.signal });
+  assert.equal(result.state, 'unknown_delivery');
+  assert.equal(result.reliableState, 'unknown_delivery');
+  assert.equal(result.attempts, 1);
+});
+
+test('reports a disconnected request as unknown delivery without retrying business work', async () => {
+  let requests = 0;
+  const result = await createOtlpHttpClient(
+    {
+      targetAlias: 'fixture',
+      endpoint: 'https://collector.example.test/v1/traces',
+      serviceName: 'test',
+      retryMaxAttempts: 1,
+    },
+    {
+      fetch: async () => {
+        requests += 1;
+        throw new TypeError('socket closed');
+      },
+    },
+  ).send(emptyRequest, 1);
+  assert.equal(result.state, 'unknown_delivery');
+  assert.equal(result.reliableState, 'unknown_delivery');
+  assert.equal(result.attempts, 1);
+  assert.equal(requests, 1);
 });
 
 test('reports a timeout as unknown delivery after retry budget exhaustion', async () => {
@@ -852,6 +1092,22 @@ test('rejects non-retryable authentication failures and redirect responses', asy
         serviceName: 'test',
       }).send(emptyRequest, 1);
       assert.equal(result.state, 'rejected');
+      assert.equal(result.attempts, 1);
+    },
+  );
+  await withServer(
+    (_, response) => {
+      response.statusCode = 400;
+      response.end();
+    },
+    async (endpoint) => {
+      const result = await createOtlpHttpClient({
+        targetAlias: 'fixture',
+        endpoint,
+        serviceName: 'test',
+      }).send(emptyRequest, 1);
+      assert.equal(result.state, 'rejected');
+      assert.equal(result.reliableState, 'permanently_rejected');
       assert.equal(result.attempts, 1);
     },
   );
@@ -898,6 +1154,248 @@ test('recovers an atomically persisted queue batch and removes it only after acc
     assert.equal(calls.count, 1);
     assert.equal(result.deliveries[0]?.batchId, 'batch-recover');
     assert.equal(result.pendingCount, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('accepts a producer enqueue while a consumer is waiting on a slow send', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'alsnap-otlp-queue-'));
+  try {
+    const consumer = await openOtlpPersistentQueue({
+      queueDir: root,
+      targetAlias: 'fixture',
+      configFingerprint: 'config-a',
+    });
+    const producer = await openOtlpPersistentQueue({
+      queueDir: root,
+      targetAlias: 'fixture',
+      configFingerprint: 'config-a',
+    });
+    await consumer.enqueue({ batchId: 'slow-send', request: emptyRequest, spanCount: 1 });
+    let markStarted: (() => void) | undefined;
+    let release: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const flushing = consumer.flush({
+      async send(_, spanCount) {
+        markStarted?.();
+        await blocked;
+        return {
+          state: 'accepted',
+          targetAlias: 'ignored',
+          attempted: true,
+          acceptedSpanCount: spanCount,
+          rejectedSpanCount: 0,
+          attempts: 1,
+        };
+      },
+    });
+    await started;
+    const queued = await producer.enqueue({
+      batchId: 'written-during-send',
+      request: emptyRequest,
+      spanCount: 1,
+    });
+    assert.equal(queued.state, 'queued');
+    release?.();
+    await flushing;
+    assert.equal((await consumer.inspect()).pendingCount, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('does not deliver a queued batch after its resolved endpoint changes', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'alsnap-otlp-queue-'));
+  try {
+    const environment: Record<string, string> = {
+      OTLP_TARGET: 'https://first.collector.test/v1/traces',
+    };
+    const config = {
+      targetAlias: 'fixture',
+      endpointEnv: 'OTLP_TARGET',
+      serviceName: 'test',
+      destinationIdentity: 'tenant-a',
+      destinationGeneration: '1',
+    } as const;
+    const queue = await openOtlpPersistentQueue({
+      queueDir: root,
+      targetAlias: config.targetAlias,
+      destinationIdentity: config.destinationIdentity,
+      destinationGeneration: config.destinationGeneration,
+      configFingerprint: createOtelExportConfigFingerprint(config, environment),
+    });
+    await queue.enqueue({ request: emptyRequest, spanCount: 1 });
+    environment.OTLP_TARGET = 'https://second.collector.test/v1/traces';
+    let sends = 0;
+    const client = createOtlpHttpClient(config, {
+      environment,
+      fetch: async () => {
+        sends += 1;
+        return new Response('{}', { status: 200 });
+      },
+    });
+    const result = await queue.flush(client);
+    assert.equal(sends, 0);
+    assert.equal(result.deliveries[0]?.reliableState, 'configuration_blocked');
+    assert.equal((await queue.inspect()).pendingCount, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('persists retry scheduling and its cumulative budget across a reopened queue', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'alsnap-otlp-queue-'));
+  let clock = 0;
+  try {
+    const options = {
+      queueDir: root,
+      targetAlias: 'fixture',
+      configFingerprint: 'config-a',
+      retryMaxAttempts: 3,
+      retryBudgetMs: 10_000,
+      now: () => clock,
+    };
+    const queue = await openOtlpPersistentQueue(options);
+    await queue.enqueue({ batchId: 'retry-persisted', request: emptyRequest, spanCount: 1 });
+    const first = await queue.flush({
+      async send() {
+        return {
+          state: 'retryable',
+          reliableState: 'retry_scheduled',
+          targetAlias: 'ignored',
+          attempted: true,
+          acceptedSpanCount: 0,
+          rejectedSpanCount: 0,
+          attempts: 1,
+          retryAfterMs: 100,
+        };
+      },
+    });
+    assert.equal(first.pendingCount, 1);
+    const recovered = await openOtlpPersistentQueue(options);
+    let sends = 0;
+    clock = 99;
+    await recovered.flush(acceptedClient({ count: sends }));
+    assert.equal(sends, 0);
+    clock = 100;
+    const accepted = await recovered.flush({
+      async send(_, spanCount) {
+        sends += 1;
+        return {
+          state: 'accepted',
+          targetAlias: 'ignored',
+          attempted: true,
+          acceptedSpanCount: spanCount,
+          rejectedSpanCount: 0,
+          attempts: 1,
+        };
+      },
+    });
+    assert.equal(sends, 1);
+    assert.equal(accepted.pendingCount, 0);
+    assert.equal((await recovered.inspect()).archivedCount, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('isolates legacy or damaged queue entries instead of sending them', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'alsnap-otlp-queue-'));
+  try {
+    const queue = await openOtlpPersistentQueue({
+      queueDir: root,
+      targetAlias: 'fixture',
+      configFingerprint: 'config-a',
+    });
+    const entries = join(root, 'entries');
+    await writeFile(join(entries, 'legacy.json'), '{"schemaVersion":"otel-export-queue-1.0"}\n');
+    await writeFile(join(entries, 'broken.json'), '{this is not JSON}\n');
+    const calls = { count: 0 };
+    const result = await queue.flush(acceptedClient(calls));
+    assert.equal(calls.count, 0);
+    assert.equal(result.pendingCount, 0);
+    const inspection = await queue.inspect();
+    assert.equal(inspection.quarantinedCount, 2);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('an expired consumer cannot remove a newer consumer lease', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'alsnap-otlp-queue-'));
+  let clock = 0;
+  try {
+    const options = {
+      queueDir: root,
+      targetAlias: 'fixture',
+      configFingerprint: 'config-a',
+      leaseDurationMs: 1,
+      now: () => clock,
+    };
+    const first = await openOtlpPersistentQueue(options);
+    const second = await openOtlpPersistentQueue(options);
+    const third = await openOtlpPersistentQueue(options);
+    await first.enqueue({ request: emptyRequest, spanCount: 1 });
+    let firstStarted: (() => void) | undefined;
+    let releaseFirst: (() => void) | undefined;
+    const firstIsSending = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const firstFlush = first.flush({
+      async send() {
+        firstStarted?.();
+        await firstBlocked;
+        return {
+          state: 'accepted',
+          targetAlias: 'ignored',
+          attempted: true,
+          acceptedSpanCount: 1,
+          rejectedSpanCount: 0,
+          attempts: 1,
+        };
+      },
+    });
+    await firstIsSending;
+    clock = 2;
+    let secondStarted: (() => void) | undefined;
+    let releaseSecond: (() => void) | undefined;
+    const secondIsSending = new Promise<void>((resolve) => {
+      secondStarted = resolve;
+    });
+    const secondBlocked = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    const secondFlush = second.flush({
+      async send() {
+        secondStarted?.();
+        await secondBlocked;
+        return {
+          state: 'accepted',
+          targetAlias: 'ignored',
+          attempted: true,
+          acceptedSpanCount: 1,
+          rejectedSpanCount: 0,
+          attempts: 1,
+        };
+      },
+    });
+    await secondIsSending;
+    releaseFirst?.();
+    await firstFlush;
+    await assert.rejects(third.flush(acceptedClient({ count: 0 })), (error: unknown) =>
+      error instanceof OtlpQueueError ? error.code === 'QUEUE_LOCKED' : false,
+    );
+    releaseSecond?.();
+    await secondFlush;
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -977,7 +1475,8 @@ test('expires old batches and leaves a deadline-interrupted delivery persisted',
       { deadlineMs: 5 },
     );
     assert.equal(result.deadlineExceeded, true);
-    assert.equal(result.pendingCount, 1);
+    assert.equal(result.pendingCount, 0);
+    assert.equal((await queue.inspect()).unknownDeliveryCount, 1);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -1037,12 +1536,18 @@ test('recovers a stale consumer lock left by an interrupted process', async () =
       queueDir: root,
       targetAlias: 'fixture',
       configFingerprint: 'config-a',
-      lockStaleMs: 1,
+      leaseDurationMs: 1_000,
     });
     await queue.enqueue({ request: emptyRequest, spanCount: 1 });
-    const lock = join(root, 'consumer.lock');
-    await writeFile(lock, '{"pid":0}\n');
-    await utimes(lock, new Date(0), new Date(0));
+    const lock = join(root, 'consumer.lease');
+    await writeFile(
+      lock,
+      JSON.stringify({
+        schemaVersion: 'otlp-persistent-queue-lease-2',
+        ownerToken: 'interrupted-consumer',
+        expiresAt: 0,
+      }),
+    );
     const calls = { count: 0 };
     const result = await queue.flush(acceptedClient(calls));
     assert.equal(calls.count, 1);

@@ -2,7 +2,9 @@
   "name": "@agent-loop-snapshot/instrumentation-anthropic",
   "version": "0.1.2",
   "license": "MIT",
-  "engines": { "node": ">=24.20.0 <25" },
+  "engines": {
+    "node": ">=24.20.0 <25"
+  },
   "private": false,
   "publishConfig": {
     "access": "public"
